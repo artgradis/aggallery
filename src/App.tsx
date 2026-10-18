@@ -341,8 +341,8 @@ export default function App() {
     const ctx = c.getContext('2d')!;
     ctx.fillStyle = '#141416'; ctx.fillRect(0, 0, 1024, 1024);
     ctx.fillStyle = '#202024'; ctx.fillRect(40, 40, 944, 944);
-    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 54px monospace'; ctx.textAlign = 'center'; ctx.fillText('ART GRADIS', 512, 470);
-    ctx.fillStyle = '#a1a1aa'; ctx.font = '24px monospace'; ctx.fillText('НАЖМИ ПРОБЕЛ И СОЗДАВАЙ ПЛАКАТ', 512, 530);
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 54px monospace'; ctx.textAlign = 'center'; ctx.fillText('ARTGRADIS', 512, 470);
+    ctx.fillStyle = '#a1a1aa'; ctx.font = '24px monospace'; ctx.fillText('ЖМИ ПРОБЕЛ И СОЗДАВАЙ ПЛАКАТ', 512, 530);
     return c;
   }, []);
 
