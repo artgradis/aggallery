@@ -1,19 +1,48 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, type CSSProperties, type MutableRefObject, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { PerspectiveCamera } from '@react-three/drei';
 import * as THREE from 'three';
 
 type Mode = 'walk' | 'paint_center' | 'view_left' | 'view_right';
 type Zone = 'none' | 'center' | 'left' | 'right';
+type MoveKeys = { w: number; s: number; a: number; d: number };
 interface Poster { id: string; image: string; author: string; date: string; }
 
 const KEY = 'artgradis_gallery_posters_v1';
 const COLORS = ['#ff3b30','#ff007a','#7928ca','#0029ff','#00f2fe','#00e096','#a8ff3e','#ffd60a','#ff8800','#ffffff','#141416'];
 
-function Player({ mode, setZone }: { mode: Mode; setZone: (z: Zone) => void }) {
+function detectTouchUi() {
+  if (typeof window === 'undefined') return false;
+  const coarse = window.matchMedia('(pointer: coarse)').matches;
+  const noHover = window.matchMedia('(hover: none)').matches;
+  const touchPoints = navigator.maxTouchPoints > 0;
+  const finePointer = window.matchMedia('(pointer: fine)').matches;
+  return coarse || noHover || (touchPoints && !finePointer);
+}
+
+function useTouchUi() {
+  const [touch, setTouch] = useState(false);
+  useEffect(() => {
+    const update = () => setTouch(detectTouchUi());
+    update();
+    const coarse = window.matchMedia('(pointer: coarse)');
+    const hover = window.matchMedia('(hover: none)');
+    coarse.addEventListener('change', update);
+    hover.addEventListener('change', update);
+    window.addEventListener('resize', update);
+    return () => {
+      coarse.removeEventListener('change', update);
+      hover.removeEventListener('change', update);
+      window.removeEventListener('resize', update);
+    };
+  }, []);
+  return touch;
+}
+
+function Player({ mode, setZone, keys }: { mode: Mode; setZone: (z: Zone) => void; keys: MutableRefObject<MoveKeys> }) {
   const mesh = useRef<THREE.Mesh>(null!);
   const look = useRef(new THREE.Vector3(0, 1, 0));
-  const s = useRef({ pos: new THREE.Vector3(0, 0.45, 1.8), rot: 0, k: { w:0, s:0, a:0, d:0 } });
+  const s = useRef({ pos: new THREE.Vector3(0, 0.45, 1.8), rot: 0 });
 
   const ballTex = useMemo(() => {
     const c = document.createElement('canvas');
@@ -33,15 +62,15 @@ function Player({ mode, setZone }: { mode: Mode; setZone: (z: Zone) => void }) {
     const onK = (e: KeyboardEvent, v: number) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
       const k = e.key.toLowerCase();
-      if (k === 'w' || k === 'arrowup') s.current.k.w = v;
-      if (k === 's' || k === 'arrowdown') s.current.k.s = v;
-      if (k === 'a' || k === 'arrowleft') s.current.k.a = v;
-      if (k === 'd' || k === 'arrowright') s.current.k.d = v;
+      if (k === 'w' || k === 'arrowup') keys.current.w = v;
+      if (k === 's' || k === 'arrowdown') keys.current.s = v;
+      if (k === 'a' || k === 'arrowleft') keys.current.a = v;
+      if (k === 'd' || k === 'arrowright') keys.current.d = v;
     };
     const d = (e: KeyboardEvent) => onK(e, 1), u = (e: KeyboardEvent) => onK(e, 0);
     window.addEventListener('keydown', d); window.addEventListener('keyup', u);
     return () => { window.removeEventListener('keydown', d); window.removeEventListener('keyup', u); };
-  }, []);
+  }, [keys]);
 
   useFrame(({ camera }, dt) => {
     const targets: Record<string, [THREE.Vector3, THREE.Vector3]> = {
@@ -57,7 +86,7 @@ function Player({ mode, setZone }: { mode: Mode; setZone: (z: Zone) => void }) {
       return;
     }
 
-    const { k } = s.current;
+    const k = keys.current;
     if (k.a) s.current.rot += 2.9 * dt;
     if (k.d) s.current.rot -= 2.9 * dt;
     const fwd = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), s.current.rot);
@@ -130,6 +159,8 @@ function MainPoster({ tex, cvs, mode, tool, color, size, text, font }: {
           }
         }}
         onPointerUp={() => { down.current = false; }}
+        onPointerLeave={() => { down.current = false; }}
+        onPointerCancel={() => { down.current = false; }}
       >
         <planeGeometry args={[2.8, 3.8]} /><meshBasicMaterial map={tex} />
       </mesh>
@@ -321,7 +352,52 @@ function Hall({ posters }: { posters: Poster[] }) {
   );
 }
 
+function DPad({ keys }: { keys: MutableRefObject<MoveKeys> }) {
+  const press = (dir: keyof MoveKeys) => ({
+    onPointerDown: (e: ReactPointerEvent<HTMLButtonElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+      e.currentTarget.setPointerCapture(e.pointerId);
+      keys.current[dir] = 1;
+    },
+    onPointerUp: (e: ReactPointerEvent<HTMLButtonElement>) => {
+      e.preventDefault();
+      keys.current[dir] = 0;
+    },
+    onPointerCancel: () => { keys.current[dir] = 0; },
+    onContextMenu: (e: ReactMouseEvent) => e.preventDefault(),
+  });
+
+  const padBtn: CSSProperties = {
+    width: 62, height: 62, border: '1px solid rgba(255,255,255,0.28)',
+    borderRadius: 16, background: 'rgba(12,12,16,0.72)', color: '#fff',
+    fontSize: 22, fontWeight: 700, touchAction: 'none', userSelect: 'none',
+    WebkitUserSelect: 'none', display: 'grid', placeItems: 'center',
+    boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+  };
+
+  return (
+    <div style={{
+      position: 'absolute', left: 'max(16px, env(safe-area-inset-left))',
+      bottom: 'max(20px, env(safe-area-inset-bottom))', zIndex: 25,
+      display: 'grid', gridTemplateColumns: '62px 62px 62px', gridTemplateRows: '62px 62px 62px',
+      gap: 8, pointerEvents: 'auto',
+    }}>
+      <span />
+      <button type="button" aria-label="Вперёд" style={padBtn} {...press('w')}>▲</button>
+      <span />
+      <button type="button" aria-label="Влево" style={padBtn} {...press('a')}>◀</button>
+      <span />
+      <button type="button" aria-label="Вправо" style={padBtn} {...press('d')}>▶</button>
+      <span />
+      <button type="button" aria-label="Назад" style={padBtn} {...press('s')}>▼</button>
+    </div>
+  );
+}
+
 export default function App() {
+  const isTouch = useTouchUi();
+  const keys = useRef<MoveKeys>({ w: 0, s: 0, a: 0, d: 0 });
   const [mode, setMode] = useState<Mode>('walk');
   const [zone, setZone] = useState<Zone>('none');
   const [tool, setTool] = useState('brush');
@@ -377,41 +453,64 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [zone, mode]);
 
-  const btn = (a: boolean) => ({
+  useEffect(() => {
+    if (mode !== 'walk') keys.current = { w: 0, s: 0, a: 0, d: 0 };
+    const clearKeys = () => { keys.current = { w: 0, s: 0, a: 0, d: 0 }; };
+    window.addEventListener('blur', clearKeys);
+    return () => window.removeEventListener('blur', clearKeys);
+  }, [mode]);
+
+  const btn = (a: boolean): CSSProperties => ({
     background: a ? '#ffffff' : 'rgba(255,255,255,0.1)', color: a ? '#000' : '#fff',
-    border: 'none', borderRadius: '14px', padding: '6px 12px', fontSize: '12px', fontWeight: 600, cursor: 'pointer'
+    border: 'none', borderRadius: isTouch ? 16 : 14, padding: isTouch ? '12px 14px' : '6px 12px',
+    fontSize: isTouch ? 14 : 12, fontWeight: 600, cursor: 'pointer', minHeight: isTouch ? 44 : undefined,
+    touchAction: 'manipulation',
+  });
+
+  const interactBtn = (bg: string, shadow: string): CSSProperties => ({
+    position: 'absolute',
+    bottom: isTouch ? 'max(28px, env(safe-area-inset-bottom))' : 40,
+    left: isTouch ? 'auto' : '50%',
+    right: isTouch ? 'max(16px, env(safe-area-inset-right))' : 'auto',
+    transform: isTouch ? 'none' : 'translateX(-50%)',
+    color: '#000', background: bg, fontWeight: 700,
+    fontSize: isTouch ? 16 : 15, padding: isTouch ? '16px 22px' : '14px 30px',
+    borderRadius: 30, border: 'none', cursor: 'pointer', boxShadow: shadow, zIndex: 20,
+    minHeight: 48, maxWidth: isTouch ? 200 : undefined, touchAction: 'manipulation',
   });
 
   return (
-    <div style={{ width: '100vw', height: '100vh', background: '#09090b', margin: 0, overflow: 'hidden', position: 'relative' }}>
-      <div style={{ position: 'absolute', top: 20, left: '50%', transform: 'translateX(-50%)', color: '#fff', fontSize: '13px', fontWeight: 600, zIndex: 10, background: 'rgba(0,0,0,0.7)', padding: '8px 24px', borderRadius: '24px', backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.15)', pointerEvents: 'none' }}>
-        {mode === 'walk' && 'Светлая Мастерская и Тёмная Галерея в едином зале! Управление: W, A, S, D'}
-        {mode === 'paint_center' && 'Редактор: создай плакат и нажми «Повесить в галерею»'}
-        {mode === 'view_left' && 'Кинетика: кликай по плакату для переключения 4 режимов!'}
-        {mode === 'view_right' && '3D-Монолит: кликай по парящему артефакту для смены формы'}
+    <div style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', background: '#09090b', margin: 0, overflow: 'hidden' }}>
+      <div style={{ position: 'absolute', top: 'max(12px, env(safe-area-inset-top))', left: '50%', transform: 'translateX(-50%)', color: '#fff', fontSize: isTouch ? 12 : 13, fontWeight: 600, zIndex: 10, background: 'rgba(0,0,0,0.7)', padding: isTouch ? '8px 16px' : '8px 24px', borderRadius: 24, backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.15)', pointerEvents: 'none', maxWidth: '90vw', textAlign: 'center' }}>
+        {mode === 'walk' && (isTouch ? 'Мастерская и галерея. Двигайся стрелками' : 'Светлая Мастерская и Тёмная Галерея в едином зале! Управление: W, A, S, D')}
+        {mode === 'paint_center' && (isTouch ? 'Рисуй пальцем по плакату' : 'Редактор: создай плакат и нажми «Повесить в галерею»')}
+        {mode === 'view_left' && (isTouch ? 'Нажми на плакат — 4 режима физики' : 'Кинетика: кликай по плакату для переключения 4 режимов!')}
+        {mode === 'view_right' && (isTouch ? 'Нажми на артефакт, чтобы сменить форму' : '3D-Монолит: кликай по парящему артефакту для смены формы')}
       </div>
 
       {mode === 'walk' && zone === 'center' && (
-        <button onClick={() => setMode('paint_center')} style={{ position: 'absolute', bottom: 40, left: '50%', transform: 'translateX(-50%)', color: '#000', background: '#fff', fontWeight: 700, fontSize: '15px', padding: '14px 30px', borderRadius: '30px', border: 'none', cursor: 'pointer', boxShadow: '0 8px 30px rgba(255,255,255,0.3)', zIndex: 20 }}>
-          [ ПРОБЕЛ ] Открыть генератор плаката
+        <button onClick={() => setMode('paint_center')} style={interactBtn('#fff', '0 8px 30px rgba(255,255,255,0.3)')}>
+          {isTouch ? 'Открыть генератор' : '[ ПРОБЕЛ ] Открыть генератор плаката'}
         </button>
       )}
       {mode === 'walk' && zone === 'left' && (
-        <button onClick={() => setMode('view_left')} style={{ position: 'absolute', bottom: 40, left: '50%', transform: 'translateX(-50%)', color: '#000', background: '#00f2fe', fontWeight: 700, fontSize: '15px', padding: '14px 30px', borderRadius: '30px', border: 'none', cursor: 'pointer', boxShadow: '0 8px 30px rgba(0,242,254,0.4)', zIndex: 20 }}>
-          [ ПРОБЕЛ ] Исследовать кинетический постер
+        <button onClick={() => setMode('view_left')} style={interactBtn('#00f2fe', '0 8px 30px rgba(0,242,254,0.4)')}>
+          {isTouch ? 'Исследовать постер' : '[ ПРОБЕЛ ] Исследовать кинетический постер'}
         </button>
       )}
       {mode === 'walk' && zone === 'right' && (
-        <button onClick={() => setMode('view_right')} style={{ position: 'absolute', bottom: 40, left: '50%', transform: 'translateX(-50%)', color: '#000', background: '#ffd60a', fontWeight: 700, fontSize: '15px', padding: '14px 30px', borderRadius: '30px', border: 'none', cursor: 'pointer', boxShadow: '0 8px 30px rgba(255,214,10,0.4)', zIndex: 20 }}>
-          [ ПРОБЕЛ ] Осмотреть 3D-монолит
+        <button onClick={() => setMode('view_right')} style={interactBtn('#ffd60a', '0 8px 30px rgba(255,214,10,0.4)')}>
+          {isTouch ? 'Осмотреть монолит' : '[ ПРОБЕЛ ] Осмотреть 3D-монолит'}
         </button>
       )}
 
       {(mode === 'view_left' || mode === 'view_right') && (
-        <button onClick={() => setMode('walk')} style={{ position: 'absolute', bottom: 30, left: '50%', transform: 'translateX(-50%)', background: '#fff', color: '#000', fontWeight: 700, border: 'none', borderRadius: '24px', padding: '12px 28px', fontSize: '14px', cursor: 'pointer', zIndex: 20 }}>
-          [ ESC ] Назад в зал
+        <button onClick={() => setMode('walk')} style={{ ...interactBtn('#fff', '0 8px 24px rgba(0,0,0,0.35)'), bottom: isTouch ? 'max(28px, env(safe-area-inset-bottom))' : 30 }}>
+          {isTouch ? 'Назад в зал' : '[ ESC ] Назад в зал'}
         </button>
       )}
+
+      {isTouch && mode === 'walk' && <DPad keys={keys} />}
 
       {modal && (
         <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', background: 'rgba(20,20,24,0.96)', padding: '28px 36px', borderRadius: '24px', border: '1px solid rgba(255,255,255,0.2)', zIndex: 50, display: 'flex', flexDirection: 'column', gap: '16px', textAlign: 'center', color: '#fff' }}>
@@ -426,7 +525,7 @@ export default function App() {
       )}
 
       {mode === 'paint_center' && (
-        <div style={{ position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', gap: '10px', alignItems: 'center', background: 'rgba(18,18,22,0.96)', padding: '14px 24px', borderRadius: '28px', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.18)', zIndex: 20, boxShadow: '0 16px 40px rgba(0,0,0,0.7)' }}>
+        <div style={{ position: 'absolute', bottom: isTouch ? 'max(12px, env(safe-area-inset-bottom))' : 20, left: '50%', transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', gap: isTouch ? 8 : 10, alignItems: 'center', background: 'rgba(18,18,22,0.96)', padding: isTouch ? '12px 14px' : '14px 24px', borderRadius: 28, backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.18)', zIndex: 20, boxShadow: '0 16px 40px rgba(0,0,0,0.7)', width: isTouch ? 'min(100vw - 16px, 720px)' : undefined, maxHeight: isTouch ? '42vh' : undefined, overflowY: isTouch ? 'auto' : undefined }}>
           <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' }}>
             {[
               ['brush','🖌 Кисть'],['spray','💨 Спрей'],['line','📏 Линия'],['rect','⬛ Прямоугольник'],
@@ -448,21 +547,26 @@ export default function App() {
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' }}>
             <div style={{ display: 'flex', gap: '5px' }}>
               {COLORS.map((c) => (
-                <button key={c} onClick={() => setColor(c)} style={{ width: 22, height: 22, borderRadius: '50%', background: c, border: color === c ? '2px solid #ffffff' : '1px solid rgba(255,255,255,0.2)', cursor: 'pointer', transform: color === c ? 'scale(1.2)' : 'scale(1)', transition: '0.1s' }} />
+                <button key={c} onClick={() => setColor(c)} style={{ width: isTouch ? 32 : 22, height: isTouch ? 32 : 22, borderRadius: '50%', background: c, border: color === c ? '2px solid #ffffff' : '1px solid rgba(255,255,255,0.2)', cursor: 'pointer', transform: color === c ? 'scale(1.15)' : 'scale(1)', transition: '0.1s', touchAction: 'manipulation' }} />
               ))}
             </div>
             <div style={{ width: 1, height: 18, background: 'rgba(255,255,255,0.2)' }} />
             <span style={{ color: '#888', fontSize: '11px' }}>Толщина:</span>
             <input type="range" min="4" max="60" value={size} onChange={(e) => setSize(Number(e.target.value))} style={{ width: 65, cursor: 'pointer' }} />
-            <button onClick={() => setModal(true)} style={{ background: '#00f2fe', color: '#000', fontWeight: 700, border: 'none', borderRadius: '14px', padding: '6px 14px', fontSize: '12px', cursor: 'pointer', boxShadow: '0 4px 15px rgba(0,242,254,0.35)' }}>🏛️ Повесить в галерею</button>
-            <button onClick={clear} style={{ background: 'transparent', color: '#a1a1aa', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '14px', padding: '6px 10px', fontSize: '12px', cursor: 'pointer' }}>Стереть</button>
-            <button onClick={() => { const a = document.createElement('a'); a.download = 'artgradis-poster.png'; a.href = cvs.toDataURL('image/png'); a.click(); }} style={{ background: '#ff441f', color: '#fff', fontWeight: 600, border: 'none', borderRadius: '14px', padding: '6px 12px', fontSize: '12px', cursor: 'pointer' }}>💾 PNG</button>
-            <button onClick={() => setMode('walk')} style={{ background: '#ffffff', color: '#000000', fontWeight: 600, border: 'none', borderRadius: '14px', padding: '6px 14px', fontSize: '12px', cursor: 'pointer' }}>[ESC] Отойти</button>
+            <button onClick={() => setModal(true)} style={{ background: '#00f2fe', color: '#000', fontWeight: 700, border: 'none', borderRadius: 14, padding: isTouch ? '12px 14px' : '6px 14px', fontSize: isTouch ? 14 : 12, cursor: 'pointer', boxShadow: '0 4px 15px rgba(0,242,254,0.35)', minHeight: isTouch ? 44 : undefined }}>🏛️ Повесить в галерею</button>
+            <button onClick={clear} style={{ background: 'transparent', color: '#a1a1aa', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 14, padding: isTouch ? '12px 12px' : '6px 10px', fontSize: isTouch ? 14 : 12, cursor: 'pointer', minHeight: isTouch ? 44 : undefined }}>Стереть</button>
+            <button onClick={() => { const a = document.createElement('a'); a.download = 'artgradis-poster.png'; a.href = cvs.toDataURL('image/png'); a.click(); }} style={{ background: '#ff441f', color: '#fff', fontWeight: 600, border: 'none', borderRadius: 14, padding: isTouch ? '12px 14px' : '6px 12px', fontSize: isTouch ? 14 : 12, cursor: 'pointer', minHeight: isTouch ? 44 : undefined }}>💾 PNG</button>
+            <button onClick={() => setMode('walk')} style={{ background: '#ffffff', color: '#000000', fontWeight: 600, border: 'none', borderRadius: 14, padding: isTouch ? '12px 14px' : '6px 14px', fontSize: isTouch ? 14 : 12, cursor: 'pointer', minHeight: isTouch ? 44 : undefined }}>{isTouch ? 'Отойти' : '[ESC] Отойти'}</button>
           </div>
         </div>
       )}
 
-      <Canvas>
+      <Canvas
+        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', display: 'block', touchAction: 'none' }}
+        gl={{ antialias: true, alpha: false }}
+        dpr={[1, 1.75]}
+        resize={{ debounce: 0 }}
+      >
         <PerspectiveCamera makeDefault fov={65} near={0.1} far={100} />
         <ambientLight intensity={0.9} />
         <pointLight position={[0, 4.2, 0]} intensity={1.5} />
@@ -473,7 +577,7 @@ export default function App() {
         <pointLight position={[0, 4, 17]} intensity={1.8} />
         <pointLight position={[0, 4, 23]} intensity={1.8} />
 
-        <Player mode={mode} setZone={setZone} />
+        <Player mode={mode} setZone={setZone} keys={keys} />
         <MainPoster tex={tex} cvs={cvs} mode={mode} tool={tool} color={color} size={size} text={text} font={font} />
         <LeftPoster mode={mode} />
         <RightSculpture mode={mode} />
