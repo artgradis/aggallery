@@ -1,10 +1,50 @@
 import { Suspense, useMemo, useEffect, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { useGLTF, SoftShadows } from '@react-three/drei';
+import { useGLTF, useProgress, Html } from '@react-three/drei';
 import * as THREE from 'three';
 
 // ----------------------------------------------------
-// 1. Единый контроллер ввода (Клавиатура + Сенсорные кнопки)
+// 0. Красивый экран загрузки для мобильных и ПК
+// ----------------------------------------------------
+function Loader() {
+  const { progress } = useProgress();
+  return (
+    <Html center>
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: '#00f0ff',
+        fontFamily: 'sans-serif',
+        fontSize: 14,
+        letterSpacing: 2,
+        textTransform: 'uppercase',
+        userSelect: 'none',
+      }}>
+        <div style={{
+          width: 140,
+          height: 3,
+          background: 'rgba(255,255,255,0.1)',
+          borderRadius: 2,
+          overflow: 'hidden',
+          marginBottom: 12
+        }}>
+          <div style={{
+            width: `${progress}%`,
+            height: '100%',
+            background: '#00f0ff',
+            transition: 'width 0.2s ease-out'
+          }} />
+        </div>
+        <div>LOADING {Math.round(progress)}%</div>
+      </div>
+    </Html>
+  );
+}
+
+// ----------------------------------------------------
+// 1. Интерфейс контроллера
 // ----------------------------------------------------
 interface InputState {
   forward: boolean;
@@ -16,14 +56,13 @@ interface InputState {
 }
 
 // ----------------------------------------------------
-// 2. Адаптивная камера для мобильных экранов
+// 2. Адаптивная камера
 // ----------------------------------------------------
 function ResponsiveCamera() {
   const { camera, size } = useThree();
   useEffect(() => {
     const isMobile = size.width < 768;
-    // На мобильных чуть расширяем FOV, чтобы комната не казалась узкой
-    (camera as THREE.PerspectiveCamera).fov = isMobile ? 62 : 50;
+    (camera as THREE.PerspectiveCamera).fov = isMobile ? 65 : 50;
     camera.updateProjectionMatrix();
   }, [camera, size]);
   return null;
@@ -155,7 +194,7 @@ function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
     groupRef.current.position.set(s.pos.x, s.pos.y + hoverY, s.pos.z);
     groupRef.current.rotation.set(s.tilt, s.angle + hoverWobble, s.roll, 'YXZ');
 
-    // 7. Камера от 3-го лица
+    // 7. Камера от третьего лица
     const isNarrow = stateThree.size.width < 768;
     const cameraDistance = isNarrow ? 4.2 : 3.6;
     const cameraHeight = isNarrow ? 1.6 : 1.3;
@@ -288,7 +327,7 @@ function Room() {
 useGLTF.preload('/room.glb');
 
 // ----------------------------------------------------
-// 6. Освещение
+// 6. Освещение (оптимизировано под мобильные GPU)
 // ----------------------------------------------------
 function Lighting() {
   const lightRef = useRef<THREE.DirectionalLight>(null!);
@@ -303,9 +342,8 @@ function Lighting() {
   return (
     <>
       <primitive object={target} position={[0, 0.5, 0]} />
-      <SoftShadows size={58} samples={16} focus={0.4} />
 
-      <ambientLight intensity={0.05} color="#cad2df" />
+      <ambientLight intensity={0.1} color="#cad2df" />
 
       <directionalLight
         ref={lightRef}
@@ -313,10 +351,9 @@ function Lighting() {
         position={[0, 16.5, -0.5]}
         intensity={3.6}
         color="#ffffff"
-        shadow-mapSize-width={2048}
-        shadow-mapSize-height={2048}
-        shadow-bias={-0.0001}
-        shadow-normalBias={0.035}
+        shadow-mapSize-width={1024}
+        shadow-mapSize-height={1024}
+        shadow-bias={-0.0002}
         shadow-camera-near={0.5}
         shadow-camera-far={45}
         shadow-camera-left={-20}
@@ -335,12 +372,11 @@ function Lighting() {
 }
 
 // ----------------------------------------------------
-// 7. Главный компонент
+// 7. Главный компонент с поддержкой мобильных
 // ----------------------------------------------------
 export default function App() {
   const [isMobile, setIsMobile] = useState(false);
 
-  // Общий реф состояния нажатий
   const input = useRef<InputState>({
     forward: false,
     backward: false,
@@ -350,7 +386,6 @@ export default function App() {
     down: false,
   });
 
-  // Автоопределение устройства (тач-экран или мобильная ширина)
   useEffect(() => {
     const checkDevice = () => {
       const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
@@ -363,7 +398,7 @@ export default function App() {
     return () => window.removeEventListener('resize', checkDevice);
   }, []);
 
-  // Слушатель клавиатуры (для ПК)
+  // Клавиатура (ПК)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'ArrowUp' || e.code === 'KeyW') input.current.forward = true;
@@ -391,12 +426,10 @@ export default function App() {
     };
   }, []);
 
-  // Хелпер для сенсорных кнопок
   const handleTouch = (key: keyof InputState, active: boolean) => {
     input.current[key] = active;
   };
 
-  // Стиль для сенсорных круглых кнопок
   const btnStyle = {
     width: 54,
     height: 54,
@@ -413,13 +446,22 @@ export default function App() {
     WebkitUserSelect: 'none' as const,
     touchAction: 'none' as const,
     cursor: 'pointer',
-    activeStyle: { background: 'rgba(0, 240, 255, 0.3)' }
   };
 
   return (
-    <div style={{ width: '100vw', height: '100vh', background: '#0e1013', margin: 0, overflow: 'hidden', position: 'relative', touchAction: 'none' }}>
+    <div style={{
+      width: '100vw',
+      height: '100vh',
+      background: '#0e1013',
+      margin: 0,
+      overflow: 'hidden',
+      position: 'relative',
+      userSelect: 'none',
+      WebkitUserSelect: 'none',
+      touchAction: 'none'
+    }}>
       
-      {/* 1. Если зашли с ПК — показываем лаконичную клавиатурную подсказку */}
+      {/* Подсказка для ПК */}
       {!isMobile && (
         <div style={{
           position: 'absolute',
@@ -443,10 +485,9 @@ export default function App() {
         </div>
       )}
 
-      {/* 2. Если зашли с Мобильного — показываем экранный джойстик */}
+      {/* Сенсорный джойстик для мобильных */}
       {isMobile && (
         <>
-          {/* Слева: D-Pad движения */}
           <div style={{
             position: 'absolute',
             bottom: 30,
@@ -461,33 +502,36 @@ export default function App() {
             <div />
             <button
               style={btnStyle}
-              onTouchStart={() => handleTouch('forward', true)}
-              onTouchEnd={() => handleTouch('forward', false)}
+              onTouchStart={(e) => { e.preventDefault(); handleTouch('forward', true); }}
+              onTouchEnd={(e) => { e.preventDefault(); handleTouch('forward', false); }}
+              onTouchCancel={() => handleTouch('forward', false)}
             >▲</button>
             <div />
 
             <button
               style={btnStyle}
-              onTouchStart={() => handleTouch('left', true)}
-              onTouchEnd={() => handleTouch('left', false)}
+              onTouchStart={(e) => { e.preventDefault(); handleTouch('left', true); }}
+              onTouchEnd={(e) => { e.preventDefault(); handleTouch('left', false); }}
+              onTouchCancel={() => handleTouch('left', false)}
             >◀</button>
             <div />
             <button
               style={btnStyle}
-              onTouchStart={() => handleTouch('right', true)}
-              onTouchEnd={() => handleTouch('right', false)}
+              onTouchStart={(e) => { e.preventDefault(); handleTouch('right', true); }}
+              onTouchEnd={(e) => { e.preventDefault(); handleTouch('right', false)} }
+              onTouchCancel={() => handleTouch('right', false)}
             >▶</button>
 
             <div />
             <button
               style={btnStyle}
-              onTouchStart={() => handleTouch('backward', true)}
-              onTouchEnd={() => handleTouch('backward', false)}
+              onTouchStart={(e) => { e.preventDefault(); handleTouch('backward', true); }}
+              onTouchEnd={(e) => { e.preventDefault(); handleTouch('backward', false); }}
+              onTouchCancel={() => handleTouch('backward', false)}
             >▼</button>
             <div />
           </div>
 
-          {/* Справа: Кнопки высоты (Вверх / Вниз) */}
           <div style={{
             position: 'absolute',
             bottom: 40,
@@ -499,16 +543,18 @@ export default function App() {
             touchAction: 'none'
           }}>
             <button
-              style={{ ...btnStyle, width: 62, height: 62, background: 'rgba(0, 240, 255, 0.2)', border: '1px solid rgba(0, 240, 255, 0.5)' }}
-              onTouchStart={() => handleTouch('up', true)}
-              onTouchEnd={() => handleTouch('up', false)}
+              style={{ ...btnStyle, width: 62, height: 62, background: 'rgba(0, 240, 255, 0.25)', border: '1px solid rgba(0, 240, 255, 0.6)' }}
+              onTouchStart={(e) => { e.preventDefault(); handleTouch('up', true); }}
+              onTouchEnd={(e) => { e.preventDefault(); handleTouch('up', false); }}
+              onTouchCancel={() => handleTouch('up', false)}
             >
               UP
             </button>
             <button
               style={{ ...btnStyle, width: 62, height: 62 }}
-              onTouchStart={() => handleTouch('down', true)}
-              onTouchEnd={() => handleTouch('down', false)}
+              onTouchStart={(e) => { e.preventDefault(); handleTouch('down', true); }}
+              onTouchEnd={(e) => { e.preventDefault(); handleTouch('down', false); }}
+              onTouchCancel={() => handleTouch('down', false)}
             >
               DN
             </button>
@@ -518,9 +564,11 @@ export default function App() {
 
       <Canvas
         shadows
+        dpr={[1, 1.5]}
         camera={{ position: [0, 2.5, 6], fov: 50 }}
         gl={{
           antialias: true,
+          powerPreference: 'high-performance',
           toneMapping: THREE.ACESFilmicToneMapping,
           toneMappingExposure: 1.0,
         }}
@@ -528,7 +576,7 @@ export default function App() {
         <ResponsiveCamera />
         <Lighting />
 
-        <Suspense fallback={null}>
+        <Suspense fallback={<Loader />}>
           <Room />
           <Drone input={input} />
         </Suspense>
