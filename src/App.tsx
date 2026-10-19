@@ -4,7 +4,7 @@ import { useGLTF, useProgress, Html } from '@react-three/drei';
 import * as THREE from 'three';
 
 // ----------------------------------------------------
-// 0. Красивый экран загрузки для мобильных и ПК
+// 0. Экран загрузки
 // ----------------------------------------------------
 function Loader() {
   const { progress } = useProgress();
@@ -62,7 +62,8 @@ function ResponsiveCamera() {
   const { camera, size } = useThree();
   useEffect(() => {
     const isMobile = size.width < 768;
-    (camera as THREE.PerspectiveCamera).fov = isMobile ? 65 : 50;
+    // Оптимальный угол обзора для вертикальных и горизонтальных экранов
+    (camera as THREE.PerspectiveCamera).fov = isMobile ? 55 : 50;
     camera.updateProjectionMatrix();
   }, [camera, size]);
   return null;
@@ -194,10 +195,10 @@ function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
     groupRef.current.position.set(s.pos.x, s.pos.y + hoverY, s.pos.z);
     groupRef.current.rotation.set(s.tilt, s.angle + hoverWobble, s.roll, 'YXZ');
 
-    // 7. Камера от третьего лица
+    // 7. Улучшенная камера: на мобильных отодвигаем и поднимаем выше
     const isNarrow = stateThree.size.width < 768;
-    const cameraDistance = isNarrow ? 4.2 : 3.6;
-    const cameraHeight = isNarrow ? 1.6 : 1.3;
+    const cameraDistance = isNarrow ? 5.6 : 3.6; // на телефоне отодвигаем дальше
+    const cameraHeight = isNarrow ? 2.3 : 1.3;   // на телефоне поднимаем выше
 
     const idealCamX = s.pos.x - Math.sin(s.angle) * cameraDistance;
     const idealCamZ = s.pos.z - Math.cos(s.angle) * cameraDistance;
@@ -212,13 +213,17 @@ function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
 
     let actualCamPos = idealCamPos;
     if (camHits.length > 0) {
-      actualCamPos = s.pos.clone().addScaledVector(camDir, Math.max(1.0, camHits[0].distance - 0.25));
+      actualCamPos = s.pos.clone().addScaledVector(camDir, Math.max(1.2, camHits[0].distance - 0.25));
     }
 
     stateThree.camera.position.lerp(actualCamPos, 0.08);
+
+    // Точка взгляда: на телефоне смотрим чуть ниже робота, 
+    // чтобы визуально поднять самого робота в верхнюю половину экрана!
+    const lookAtOffsetY = isNarrow ? -0.3 : 0.2;
     stateThree.camera.lookAt(
       s.pos.x + Math.sin(s.angle) * 1.5,
-      s.pos.y + 0.2,
+      s.pos.y + lookAtOffsetY,
       s.pos.z + Math.cos(s.angle) * 1.5
     );
   });
@@ -228,7 +233,7 @@ function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
       <primitive
         object={botScene}
         rotation={[0, Math.PI, 0]}
-        scale={[0.45, 0.45, 0.45]}
+        scale={[0.42, 0.42, 0.42]}
       />
       <pointLight
         position={[0, -0.25, 0]}
@@ -327,7 +332,7 @@ function Room() {
 useGLTF.preload('/room.glb');
 
 // ----------------------------------------------------
-// 6. Освещение (оптимизировано под мобильные GPU)
+// 6. Освещение
 // ----------------------------------------------------
 function Lighting() {
   const lightRef = useRef<THREE.DirectionalLight>(null!);
@@ -372,7 +377,7 @@ function Lighting() {
 }
 
 // ----------------------------------------------------
-// 7. Главный компонент с поддержкой мобильных
+// 7. Главный компонент
 // ----------------------------------------------------
 export default function App() {
   const [isMobile, setIsMobile] = useState(false);
@@ -431,14 +436,14 @@ export default function App() {
   };
 
   const btnStyle = {
-    width: 54,
-    height: 54,
+    width: 52,
+    height: 52,
     borderRadius: '50%',
-    background: 'rgba(255, 255, 255, 0.12)',
+    background: 'rgba(255, 255, 255, 0.14)',
     backdropFilter: 'blur(10px)',
-    border: '1px solid rgba(255, 255, 255, 0.25)',
+    border: '1px solid rgba(255, 255, 255, 0.28)',
     color: '#ffffff',
-    fontSize: 20,
+    fontSize: 18,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -460,7 +465,16 @@ export default function App() {
       WebkitUserSelect: 'none',
       touchAction: 'none'
     }}>
-      
+      {/* Скрываем назойливую плашку Netlify */}
+      <style>{`
+        [id*="netlify"], iframe[src*="netlify"], .netlify-badge {
+          display: none !important;
+          visibility: hidden !important;
+          opacity: 0 !important;
+          pointer-events: none !important;
+        }
+      `}</style>
+
       {/* Подсказка для ПК */}
       {!isMobile && (
         <div style={{
@@ -485,17 +499,18 @@ export default function App() {
         </div>
       )}
 
-      {/* Сенсорный джойстик для мобильных */}
+      {/* Сенсорные контроллеры — подняты выше зоны панелей */}
       {isMobile && (
         <>
+          {/* D-Pad слева — поднят на 95px от низа */}
           <div style={{
             position: 'absolute',
-            bottom: 30,
-            left: 24,
+            bottom: 95,
+            left: 20,
             zIndex: 60,
             display: 'grid',
-            gridTemplateColumns: 'repeat(3, 56px)',
-            gridTemplateRows: 'repeat(3, 56px)',
+            gridTemplateColumns: 'repeat(3, 52px)',
+            gridTemplateRows: 'repeat(3, 52px)',
             gap: 6,
             touchAction: 'none'
           }}>
@@ -518,7 +533,7 @@ export default function App() {
             <button
               style={btnStyle}
               onTouchStart={(e) => { e.preventDefault(); handleTouch('right', true); }}
-              onTouchEnd={(e) => { e.preventDefault(); handleTouch('right', false)} }
+              onTouchEnd={(e) => { e.preventDefault(); handleTouch('right', false); }}
               onTouchCancel={() => handleTouch('right', false)}
             >▶</button>
 
@@ -532,10 +547,11 @@ export default function App() {
             <div />
           </div>
 
+          {/* Кнопки высоты справа — подняты на 110px от низа */}
           <div style={{
             position: 'absolute',
-            bottom: 40,
-            right: 28,
+            bottom: 110,
+            right: 22,
             zIndex: 60,
             display: 'flex',
             flexDirection: 'column',
@@ -543,7 +559,7 @@ export default function App() {
             touchAction: 'none'
           }}>
             <button
-              style={{ ...btnStyle, width: 62, height: 62, background: 'rgba(0, 240, 255, 0.25)', border: '1px solid rgba(0, 240, 255, 0.6)' }}
+              style={{ ...btnStyle, width: 58, height: 58, background: 'rgba(0, 240, 255, 0.25)', border: '1px solid rgba(0, 240, 255, 0.6)' }}
               onTouchStart={(e) => { e.preventDefault(); handleTouch('up', true); }}
               onTouchEnd={(e) => { e.preventDefault(); handleTouch('up', false); }}
               onTouchCancel={() => handleTouch('up', false)}
@@ -551,7 +567,7 @@ export default function App() {
               UP
             </button>
             <button
-              style={{ ...btnStyle, width: 62, height: 62 }}
+              style={{ ...btnStyle, width: 58, height: 58 }}
               onTouchStart={(e) => { e.preventDefault(); handleTouch('down', true); }}
               onTouchEnd={(e) => { e.preventDefault(); handleTouch('down', false); }}
               onTouchCancel={() => handleTouch('down', false)}
