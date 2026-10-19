@@ -1,587 +1,537 @@
-import { useState, useEffect, useRef, useMemo, type CSSProperties, type MutableRefObject, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
-import { PerspectiveCamera } from '@react-three/drei';
+import { Suspense, useMemo, useEffect, useRef, useState } from 'react';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { useGLTF, SoftShadows } from '@react-three/drei';
 import * as THREE from 'three';
 
-type Mode = 'walk' | 'paint_center' | 'view_left' | 'view_right';
-type Zone = 'none' | 'center' | 'left' | 'right';
-type MoveKeys = { w: number; s: number; a: number; d: number };
-interface Poster { id: string; image: string; author: string; date: string; }
-
-const KEY = 'artgradis_gallery_posters_v1';
-const COLORS = ['#ff3b30','#ff007a','#7928ca','#0029ff','#00f2fe','#00e096','#a8ff3e','#ffd60a','#ff8800','#ffffff','#141416'];
-
-function detectTouchUi() {
-  if (typeof window === 'undefined') return false;
-  const coarse = window.matchMedia('(pointer: coarse)').matches;
-  const noHover = window.matchMedia('(hover: none)').matches;
-  const touchPoints = navigator.maxTouchPoints > 0;
-  const finePointer = window.matchMedia('(pointer: fine)').matches;
-  return coarse || noHover || (touchPoints && !finePointer);
+// ----------------------------------------------------
+// 1. Единый контроллер ввода (Клавиатура + Сенсорные кнопки)
+// ----------------------------------------------------
+interface InputState {
+  forward: boolean;
+  backward: boolean;
+  left: boolean;
+  right: boolean;
+  up: boolean;
+  down: boolean;
 }
 
-function useTouchUi() {
-  const [touch, setTouch] = useState(false);
+// ----------------------------------------------------
+// 2. Адаптивная камера для мобильных экранов
+// ----------------------------------------------------
+function ResponsiveCamera() {
+  const { camera, size } = useThree();
   useEffect(() => {
-    const update = () => setTouch(detectTouchUi());
-    update();
-    const coarse = window.matchMedia('(pointer: coarse)');
-    const hover = window.matchMedia('(hover: none)');
-    coarse.addEventListener('change', update);
-    hover.addEventListener('change', update);
-    window.addEventListener('resize', update);
-    return () => {
-      coarse.removeEventListener('change', update);
-      hover.removeEventListener('change', update);
-      window.removeEventListener('resize', update);
-    };
-  }, []);
-  return touch;
+    const isMobile = size.width < 768;
+    // На мобильных чуть расширяем FOV, чтобы комната не казалась узкой
+    (camera as THREE.PerspectiveCamera).fov = isMobile ? 62 : 50;
+    camera.updateProjectionMatrix();
+  }, [camera, size]);
+  return null;
 }
 
-function Player({ mode, setZone, keys }: { mode: Mode; setZone: (z: Zone) => void; keys: MutableRefObject<MoveKeys> }) {
-  const mesh = useRef<THREE.Mesh>(null!);
-  const look = useRef(new THREE.Vector3(0, 1, 0));
-  const s = useRef({ pos: new THREE.Vector3(0, 0.45, 1.8), rot: 0 });
+// ----------------------------------------------------
+// 3. Персонаж-робот (Дрон)
+// ----------------------------------------------------
+function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
+  const { scene: botScene } = useGLTF('/bot.glb');
+  const { scene: roomScene } = useGLTF('/room.glb');
+  const groupRef = useRef<THREE.Group>(null!);
 
-  const ballTex = useMemo(() => {
-    const c = document.createElement('canvas');
-    c.width = 512; c.height = 512;
-    const ctx = c.getContext('2d')!;
-    ctx.fillStyle = '#9e9ea6';
-    ctx.fillRect(0, 0, 512, 512);
-    ctx.fillStyle = '#111114';
-    ctx.fillRect(216, 0, 80, 512);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(212, 0, 4, 512);
-    ctx.fillRect(296, 0, 4, 512);
-    return new THREE.CanvasTexture(c);
-  }, []);
+  const roomMeshes = useMemo(() => {
+    const meshes: THREE.Mesh[] = [];
+    roomScene.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        meshes.push(child as THREE.Mesh);
+      }
+    });
+    return meshes;
+  }, [roomScene]);
 
-  useEffect(() => {
-    const onK = (e: KeyboardEvent, v: number) => {
-      if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
-      const k = e.key.toLowerCase();
-      if (k === 'w' || k === 'arrowup') keys.current.w = v;
-      if (k === 's' || k === 'arrowdown') keys.current.s = v;
-      if (k === 'a' || k === 'arrowleft') keys.current.a = v;
-      if (k === 'd' || k === 'arrowright') keys.current.d = v;
-    };
-    const d = (e: KeyboardEvent) => onK(e, 1), u = (e: KeyboardEvent) => onK(e, 0);
-    window.addEventListener('keydown', d); window.addEventListener('keyup', u);
-    return () => { window.removeEventListener('keydown', d); window.removeEventListener('keyup', u); };
-  }, [keys]);
+  const DRONE_RADIUS = 0.4;
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
+  const downDir = useMemo(() => new THREE.Vector3(0, -1, 0), []);
+  const rayDir = useMemo(() => new THREE.Vector3(), []);
 
-  useFrame(({ camera }, dt) => {
-    const targets: Record<string, [THREE.Vector3, THREE.Vector3]> = {
-      paint_center: [new THREE.Vector3(0, 2.3, -2.1), new THREE.Vector3(0, 2.3, -4.9)],
-      view_left: [new THREE.Vector3(-2.2, 2.3, -1), new THREE.Vector3(-4.9, 2.3, -1)],
-      view_right: [new THREE.Vector3(2.2, 2.3, -1), new THREE.Vector3(4.9, 2.3, -1)],
-    };
-
-    if (targets[mode]) {
-      camera.position.lerp(targets[mode][0], dt * 4);
-      look.current.lerp(targets[mode][1], dt * 5);
-      camera.lookAt(look.current);
-      return;
-    }
-
-    const k = keys.current;
-    if (k.a) s.current.rot += 2.9 * dt;
-    if (k.d) s.current.rot -= 2.9 * dt;
-    const fwd = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), s.current.rot);
-    const n = s.current.pos.clone();
-    if (k.w) n.addScaledVector(fwd, 5.2 * dt);
-    if (k.s) n.addScaledVector(fwd, -3.5 * dt);
-
-    n.x = Math.max(-4.3, Math.min(4.3, n.x));
-    n.z = Math.max(-4.3, Math.min(25.2, n.z));
-    if (!(n.x > -1.95 && n.x < 1.95 && n.z > -0.35 && n.z < 1.35)) s.current.pos.copy(n);
-    if (mesh.current) { mesh.current.position.copy(s.current.pos); mesh.current.rotation.y = s.current.rot; }
-
-    const dC = s.current.pos.distanceTo(new THREE.Vector3(0, 0.45, -4.9));
-    const dL = s.current.pos.distanceTo(new THREE.Vector3(-4.9, 0.45, -1));
-    const dR = s.current.pos.distanceTo(new THREE.Vector3(4.9, 0.45, -1));
-    setZone(dC < 2.7 ? 'center' : dL < 2.7 ? 'left' : dR < 2.7 ? 'right' : 'none');
-
-    const camT = s.current.pos.clone().add(new THREE.Vector3(0, 2.1, 4).applyAxisAngle(new THREE.Vector3(0, 1, 0), s.current.rot));
-    camera.position.lerp(camT, Math.min(dt * 8, 1));
-    look.current.lerp(s.current.pos.clone().add(new THREE.Vector3(0, 0.75, 0)), Math.min(dt * 10, 1));
-    camera.lookAt(look.current);
+  const state = useRef({
+    pos: new THREE.Vector3(0, 1.2, 2.0),
+    angle: 0,
+    tilt: 0,
+    roll: 0,
+    speed: 3.5,
   });
 
-  return (
-    <mesh ref={mesh} position={[0, 0.45, 1.8]}>
-      <sphereGeometry args={[0.42, 32, 32]} />
-      <meshStandardMaterial map={ballTex} roughness={0.25} metalness={0.15} />
-    </mesh>
-  );
-}
+  useEffect(() => {
+    botScene.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.isMesh) {
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+      }
+    });
+  }, [botScene]);
 
-function MainPoster({ tex, cvs, mode, tool, color, size, text, font }: {
-  tex: THREE.CanvasTexture; cvs: HTMLCanvasElement; mode: Mode; tool: string; color: string; size: number; text: string; font: string;
-}) {
-  const down = useRef(false);
-  const start = useRef<{ x: number; y: number } | null>(null);
-  const snap = useRef<ImageData | null>(null);
-  const xy = (uv: THREE.Vector2) => ({ x: uv.x * 1024, y: (1 - uv.y) * 1024 });
+  useFrame((stateThree, delta) => {
+    if (!groupRef.current) return;
+    const inp = input.current;
+    const s = state.current;
+    const time = stateThree.clock.getElapsedTime();
 
-  return (
-    <group position={[0, 2.3, -4.9]}>
-      <mesh
-        onPointerDown={(e) => {
-          if (mode !== 'paint_center' || !e.uv) return;
-          e.stopPropagation(); down.current = true;
-          const p = xy(e.uv); start.current = p;
-          const ctx = cvs.getContext('2d'); if (!ctx) return;
-          snap.current = ctx.getImageData(0, 0, 1024, 1024);
-          ctx.fillStyle = ctx.strokeStyle = color;
-          if (tool === 'brush') { ctx.beginPath(); ctx.arc(p.x, p.y, size, 0, Math.PI * 2); ctx.fill(); }
-          else if (tool === 'spray') { for (let i = 0; i < 25; i++) ctx.fillRect(p.x + Math.cos(Math.random()*6.28)*Math.random()*size*1.6, p.y + Math.sin(Math.random()*6.28)*Math.random()*size*1.6, 2, 2); }
-          else if (tool === 'stamp_cross') { ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(p.x - 30, p.y); ctx.lineTo(p.x + 30, p.y); ctx.moveTo(p.x, p.y - 30); ctx.lineTo(p.x, p.y + 30); ctx.stroke(); }
-          else if (tool === 'stamp_barcode') { for (let i = 0; i < 14; i++) ctx.fillRect(p.x - 60 + i * 9, p.y - 25, i % 3 === 0 ? 7 : 3, 50); }
-          else if (tool === 'text') { ctx.font = `bold ${Math.max(32, size * 2)}px ${font}`; ctx.fillText(text || 'ARTGRADIS', p.x, p.y); }
-          tex.needsUpdate = true;
-        }}
-        onPointerMove={(e) => {
-          if (mode !== 'paint_center' || !down.current || !e.uv) return;
-          e.stopPropagation();
-          const p = xy(e.uv); const ctx = cvs.getContext('2d'); if (!ctx) return;
-          ctx.fillStyle = ctx.strokeStyle = color;
-          if (tool === 'brush') { ctx.beginPath(); ctx.arc(p.x, p.y, size, 0, Math.PI * 2); ctx.fill(); tex.needsUpdate = true; }
-          else if (tool === 'spray') { for (let i = 0; i < 20; i++) ctx.fillRect(p.x + Math.cos(Math.random()*6.28)*Math.random()*size*1.6, p.y + Math.sin(Math.random()*6.28)*Math.random()*size*1.6, 2, 2); tex.needsUpdate = true; }
-          else if (['rect', 'circle', 'line'].includes(tool) && start.current && snap.current) {
-            ctx.putImageData(snap.current, 0, 0); ctx.lineWidth = Math.max(4, size / 2);
-            if (tool === 'rect') ctx.strokeRect(start.current.x, start.current.y, p.x - start.current.x, p.y - start.current.y);
-            else if (tool === 'circle') { ctx.beginPath(); ctx.arc(start.current.x, start.current.y, Math.hypot(p.x - start.current.x, p.y - start.current.y), 0, Math.PI * 2); ctx.stroke(); }
-            else if (tool === 'line') { ctx.beginPath(); ctx.moveTo(start.current.x, start.current.y); ctx.lineTo(p.x, p.y); ctx.stroke(); }
-            tex.needsUpdate = true;
+    // 1. Поворот влево-вправо
+    const turnSpeed = 2.4;
+    let targetRoll = 0;
+    if (inp.left) {
+      s.angle += turnSpeed * delta;
+      targetRoll = 0.22;
+    }
+    if (inp.right) {
+      s.angle -= turnSpeed * delta;
+      targetRoll = -0.22;
+    }
+
+    // 2. Движение вперед-назад
+    let forwardSpeed = 0;
+    let targetTilt = 0;
+    if (inp.forward) {
+      forwardSpeed = s.speed;
+      targetTilt = 0.18;
+    }
+    if (inp.backward) {
+      forwardSpeed = -s.speed * 0.6;
+      targetTilt = -0.12;
+    }
+
+    const moveX = Math.sin(s.angle) * forwardSpeed * delta;
+    const moveZ = Math.cos(s.angle) * forwardSpeed * delta;
+
+    s.pos.x += moveX;
+    s.pos.z += moveZ;
+
+    // 3. Отталкивание от стен
+    for (let i = 0; i < 8; i++) {
+      const a = (i * Math.PI) / 4;
+      rayDir.set(Math.cos(a), 0, Math.sin(a));
+      raycaster.set(s.pos, rayDir);
+      raycaster.far = DRONE_RADIUS;
+      const hits = raycaster.intersectObjects(roomMeshes, true);
+      if (hits.length > 0) {
+        const hit = hits[0];
+        if (hit.face && Math.abs(hit.face.normal.y) < 0.7) {
+          const penetration = DRONE_RADIUS - hit.distance;
+          if (penetration > 0) {
+            s.pos.x += hit.face.normal.x * penetration;
+            s.pos.z += hit.face.normal.z * penetration;
           }
-        }}
-        onPointerUp={() => { down.current = false; }}
-        onPointerLeave={() => { down.current = false; }}
-        onPointerCancel={() => { down.current = false; }}
-      >
-        <planeGeometry args={[2.8, 3.8]} /><meshBasicMaterial map={tex} />
-      </mesh>
-      <mesh position={[0, 0, -0.02]}><planeGeometry args={[2.95, 3.95]} /><meshStandardMaterial color="#161618" roughness={0.4} /></mesh>
+        }
+      }
+    }
+
+    // 4. Подъем и спуск
+    let moveY = 0;
+    if (inp.up) moveY += 1.8 * delta;
+    if (inp.down) moveY -= 1.8 * delta;
+    s.pos.y += moveY;
+
+    // 5. Ограничение высоты
+    raycaster.set(new THREE.Vector3(s.pos.x, s.pos.y + 1.0, s.pos.z), downDir);
+    raycaster.far = 10;
+    const floorHits = raycaster.intersectObjects(roomMeshes, true);
+
+    let currentFloorY = -1.0;
+    if (floorHits.length > 0) {
+      currentFloorY = floorHits[0].point.y;
+    }
+
+    const minHeight = currentFloorY + 0.35;
+    const maxHeight = 2.6;
+    s.pos.y = THREE.MathUtils.clamp(s.pos.y, minHeight, maxHeight);
+
+    // 6. Покачивание
+    const hoverY = Math.sin(time * 3) * 0.035;
+    const hoverWobble = Math.cos(time * 2) * 0.015;
+
+    s.tilt = THREE.MathUtils.lerp(s.tilt, targetTilt, 0.1);
+    s.roll = THREE.MathUtils.lerp(s.roll, targetRoll, 0.1);
+
+    groupRef.current.position.set(s.pos.x, s.pos.y + hoverY, s.pos.z);
+    groupRef.current.rotation.set(s.tilt, s.angle + hoverWobble, s.roll, 'YXZ');
+
+    // 7. Камера от 3-го лица
+    const isNarrow = stateThree.size.width < 768;
+    const cameraDistance = isNarrow ? 4.2 : 3.6;
+    const cameraHeight = isNarrow ? 1.6 : 1.3;
+
+    const idealCamX = s.pos.x - Math.sin(s.angle) * cameraDistance;
+    const idealCamZ = s.pos.z - Math.cos(s.angle) * cameraDistance;
+    const idealCamY = s.pos.y + cameraHeight;
+    const idealCamPos = new THREE.Vector3(idealCamX, idealCamY, idealCamZ);
+
+    const camDir = idealCamPos.clone().sub(s.pos).normalize();
+    const camMaxDist = idealCamPos.distanceTo(s.pos);
+    raycaster.set(s.pos, camDir);
+    raycaster.far = camMaxDist;
+    const camHits = raycaster.intersectObjects(roomMeshes, true);
+
+    let actualCamPos = idealCamPos;
+    if (camHits.length > 0) {
+      actualCamPos = s.pos.clone().addScaledVector(camDir, Math.max(1.0, camHits[0].distance - 0.25));
+    }
+
+    stateThree.camera.position.lerp(actualCamPos, 0.08);
+    stateThree.camera.lookAt(
+      s.pos.x + Math.sin(s.angle) * 1.5,
+      s.pos.y + 0.2,
+      s.pos.z + Math.cos(s.angle) * 1.5
+    );
+  });
+
+  return (
+    <group ref={groupRef}>
+      <primitive
+        object={botScene}
+        rotation={[0, Math.PI, 0]}
+        scale={[0.45, 0.45, 0.45]}
+      />
+      <pointLight
+        position={[0, -0.25, 0]}
+        color="#00f0ff"
+        intensity={2.2}
+        distance={3.0}
+        decay={2}
+      />
     </group>
   );
 }
 
-function LeftPoster({ mode }: { mode: Mode }) {
-  const [m, setM] = useState({ x: 0.5, y: 0.5 });
-  const [kineticMode, setKineticMode] = useState(0);
-  const cvs = useMemo(() => document.createElement('canvas'), []);
-  const tex = useMemo(() => new THREE.CanvasTexture(cvs), [cvs]);
-  const modeNames = ['1/4: ВОЛНА', '2/4: СЖАТИЕ', '3/4: ГЛИТЧ', '4/4: ВИХРЬ'];
+useGLTF.preload('/bot.glb');
+
+// ----------------------------------------------------
+// 4. Текстура бетона
+// ----------------------------------------------------
+function useConcreteTextures() {
+  return useMemo(() => {
+    const size = 1024;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+
+    ctx.fillStyle = '#a2a4aa';
+    ctx.fillRect(0, 0, size, size);
+
+    const imgData = ctx.getImageData(0, 0, size, size);
+    const data = imgData.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const grain = (Math.random() - 0.5) * 30;
+      data[i] = Math.min(255, Math.max(0, data[i] + grain));
+      data[i + 1] = Math.min(255, Math.max(0, data[i + 1] + grain));
+      data[i + 2] = Math.min(255, Math.max(0, data[i + 2] + grain));
+    }
+    ctx.putImageData(imgData, 0, 0);
+
+    for (let i = 0; i < 45; i++) {
+      const x = Math.random() * size;
+      const y = Math.random() * size;
+      const r = 35 + Math.random() * 110;
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, 'rgba(0,0,0,0.05)');
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const map = new THREE.CanvasTexture(canvas);
+    map.wrapS = THREE.RepeatWrapping;
+    map.wrapT = THREE.RepeatWrapping;
+    map.repeat.set(3, 3);
+
+    const bumpMap = new THREE.CanvasTexture(canvas);
+    bumpMap.wrapS = THREE.RepeatWrapping;
+    bumpMap.wrapT = THREE.RepeatWrapping;
+    bumpMap.repeat.set(3, 3);
+
+    return { map, bumpMap };
+  }, []);
+}
+
+// ----------------------------------------------------
+// 5. Комната
+// ----------------------------------------------------
+function Room() {
+  const { scene } = useGLTF('/room.glb');
+  const { map, bumpMap } = useConcreteTextures();
 
   useEffect(() => {
-    cvs.width = 512; cvs.height = 768;
-    const ctx = cvs.getContext('2d'); if (!ctx) return;
-    ctx.fillStyle = kineticMode === 2 ? '#ff2b06' : '#0e0e12';
-    ctx.fillRect(0, 0, 512, 768);
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
-    for (let x = 0; x < 512; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 768); ctx.stroke(); }
+    scene.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.isMesh) {
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
 
-    ctx.fillStyle = '#00f2fe'; ctx.font = 'bold 22px monospace';
-    ctx.fillText(`[ ${modeNames[kineticMode]} ]`, 40, 60);
-    ctx.fillStyle = '#888894'; ctx.font = '14px monospace';
-    ctx.fillText('КЛИКАЙ ДЛЯ СМЕНЫ ФИЗИКИ', 40, 85);
-
-    const words = ['KINETIC', 'SWISS', 'MOTION', 'DESIGN', 'SYSTEM', 'FUTURE'];
-    words.forEach((w, i) => {
-      ctx.save();
-      const baseY = 160 + i * 95;
-      if (kineticMode === 0) {
-        const wave = Math.sin((m.y * 768 - baseY) * 0.015) * (m.x - 0.5) * 160;
-        ctx.fillStyle = i % 2 === 0 ? '#ffffff' : '#ffd60a';
-        ctx.font = '900 66px Helvetica, Arial, sans-serif';
-        ctx.fillText(w, 40 + wave, baseY);
-      } else if (kineticMode === 1) {
-        const distY = Math.abs(m.y * 768 - baseY);
-        ctx.translate(40, baseY);
-        ctx.scale(1 + (m.x - 0.5) * 0.8, Math.max(0.4, 2.2 - distY * 0.005));
-        ctx.fillStyle = '#ffffff';
-        ctx.font = '900 52px Helvetica, Arial, sans-serif';
-        ctx.fillText(w, 0, 0);
-      } else if (kineticMode === 2) {
-        ctx.fillStyle = i % 2 === 0 ? '#111113' : '#ffffff';
-        ctx.font = '900 68px monospace';
-        ctx.fillText(w, 40 + (Math.random() - 0.5) * (m.x * 120), baseY);
-      } else if (kineticMode === 3) {
-        ctx.translate(256, baseY);
-        ctx.rotate((m.x - 0.5) * (i + 1) * 0.35);
-        ctx.fillStyle = '#00f2fe';
-        ctx.font = '900 62px Helvetica, Arial, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(w, 0, 0);
+        mesh.material = new THREE.MeshStandardMaterial({
+          map: map,
+          bumpMap: bumpMap,
+          bumpScale: 0.02,
+          roughness: 0.86,
+          metalness: 0.03,
+          color: new THREE.Color('#a8abb2'),
+          shadowSide: THREE.DoubleSide,
+        });
       }
-      ctx.restore();
     });
+  }, [scene, map, bumpMap]);
 
-    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(m.x * 512, m.y * 768, 30, 0, Math.PI * 2); ctx.stroke();
-    tex.needsUpdate = true;
-  }, [m, kineticMode, cvs, tex]);
-
-  return (
-    <group position={[-4.9, 2.3, -1]} rotation={[0, Math.PI / 2, 0]}>
-      <mesh
-        onPointerMove={(e) => { if (mode === 'view_left' && e.uv) setM({ x: e.uv.x, y: 1 - e.uv.y }); }}
-        onClick={() => { if (mode === 'view_left') setKineticMode((p) => (p + 1) % 4); }}
-      >
-        <planeGeometry args={[2.2, 3.2]} /><meshBasicMaterial map={tex} />
-      </mesh>
-      <mesh position={[0, 0, -0.02]}><planeGeometry args={[2.3, 3.3]} /><meshStandardMaterial color="#111113" /></mesh>
-    </group>
-  );
+  return <primitive object={scene} position={[0, 0, 0]} />;
 }
 
-function RightSculpture({ mode }: { mode: Mode }) {
-  const mesh = useRef<THREE.Mesh>(null!);
-  const [shape, setShape] = useState(0);
-  useFrame((_, dt) => {
-    if (mesh.current) {
-      mesh.current.rotation.x += dt * 0.6; mesh.current.rotation.y += dt * 0.8;
-      mesh.current.position.y = 2.3 + Math.sin(Date.now() * 0.002) * 0.15;
+useGLTF.preload('/room.glb');
+
+// ----------------------------------------------------
+// 6. Освещение
+// ----------------------------------------------------
+function Lighting() {
+  const lightRef = useRef<THREE.DirectionalLight>(null!);
+  const [target] = useState(() => new THREE.Object3D());
+
+  useEffect(() => {
+    if (lightRef.current) {
+      lightRef.current.target = target;
     }
-  });
+  }, [target]);
 
   return (
-    <group position={[4.9, 0, -1]} rotation={[0, -Math.PI / 2, 0]}>
-      <mesh position={[0, 2.3, -0.02]}><planeGeometry args={[2.3, 3.3]} /><meshStandardMaterial color="#111114" /></mesh>
-      <mesh ref={mesh} position={[0, 2.3, 0.9]} scale={0.75} onClick={(e) => { if (mode === 'view_right') { e.stopPropagation(); setShape((p) => (p + 1) % 3); } }}>
-        {shape === 0 && <icosahedronGeometry args={[1, 0]} />}
-        {shape === 1 && <torusKnotGeometry args={[0.7, 0.25, 64, 16]} />}
-        {shape === 2 && <octahedronGeometry args={[1, 0]} />}
-        {shape === 0 && <meshStandardMaterial color="#ffd60a" metalness={0.9} roughness={0.15} />}
-        {shape === 1 && <meshStandardMaterial color="#00f2fe" wireframe />}
-        {shape === 2 && <meshStandardMaterial color="#ff007a" metalness={0.4} roughness={0.3} />}
-      </mesh>
-    </group>
+    <>
+      <primitive object={target} position={[0, 0.5, 0]} />
+      <SoftShadows size={58} samples={16} focus={0.4} />
+
+      <ambientLight intensity={0.05} color="#cad2df" />
+
+      <directionalLight
+        ref={lightRef}
+        castShadow
+        position={[0, 16.5, -0.5]}
+        intensity={3.6}
+        color="#ffffff"
+        shadow-mapSize-width={2048}
+        shadow-mapSize-height={2048}
+        shadow-bias={-0.0001}
+        shadow-normalBias={0.035}
+        shadow-camera-near={0.5}
+        shadow-camera-far={45}
+        shadow-camera-left={-20}
+        shadow-camera-right={20}
+        shadow-camera-top={20}
+        shadow-camera-bottom={-20}
+      />
+
+      <directionalLight
+        position={[8, 5, -8]}
+        intensity={0.8}
+        color="#c0d4ec"
+      />
+    </>
   );
 }
 
-function PosterSlot({ poster, idx }: { poster?: Poster; idx: number }) {
-  const tex = useMemo(() => {
-    const c = document.createElement('canvas'); c.width = 512; c.height = 768;
-    const ctx = c.getContext('2d')!;
-    if (!poster) {
-      ctx.fillStyle = '#18181f'; ctx.fillRect(0, 0, 512, 768);
-      ctx.strokeStyle = '#3f3f4e'; ctx.lineWidth = 6; ctx.strokeRect(20, 20, 472, 728);
-      ctx.fillStyle = '#71717a'; ctx.font = 'bold 36px monospace'; ctx.textAlign = 'center'; ctx.fillText(`СЛОТ #${idx + 1}`, 256, 380);
-      return new THREE.CanvasTexture(c);
-    }
-    const t = new THREE.CanvasTexture(c);
-    const img = new Image();
-    img.src = poster.image;
-    img.onload = () => { ctx.drawImage(img, 0, 0, 512, 768); t.needsUpdate = true; };
-    return t;
-  }, [poster, idx]);
-
-  const plq = useMemo(() => {
-    const c = document.createElement('canvas'); c.width = 256; c.height = 80;
-    const ctx = c.getContext('2d')!;
-    ctx.fillStyle = '#18181c'; ctx.fillRect(0, 0, 256, 80);
-    ctx.strokeStyle = '#52525e'; ctx.lineWidth = 2; ctx.strokeRect(4, 4, 248, 72);
-    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 20px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText(poster ? poster.author.slice(0, 16) : `МЕСТО #${idx + 1}`, 128, 35);
-    ctx.fillStyle = '#ff441f'; ctx.font = '14px monospace'; ctx.fillText(poster ? poster.date : 'СВОБОДНО', 128, 58);
-    return new THREE.CanvasTexture(c);
-  }, [poster, idx]);
-
-  return (
-    <group>
-      <mesh><planeGeometry args={[2, 3]} /><meshBasicMaterial map={tex} /></mesh>
-      <mesh position={[0, 0, -0.02]}><planeGeometry args={[2.2, 3.2]} /><meshStandardMaterial color={poster ? '#0c0c0e' : '#272733'} roughness={0.2} /></mesh>
-      <mesh position={[0, -1.8, 0.02]}><planeGeometry args={[0.9, 0.28]} /><meshBasicMaterial map={plq} /></mesh>
-      <mesh position={[0, 1.8, 0.3]}><boxGeometry args={[0.6, 0.08, 0.25]} /><meshStandardMaterial color="#ffffff" emissive="#ffffff" emissiveIntensity={0.6} /></mesh>
-    </group>
-  );
-}
-
-function Hall({ posters }: { posters: Poster[] }) {
-  const zSlots = [8, 12, 16, 20, 24];
-
-  const floorTex = useMemo(() => {
-    const c = document.createElement('canvas');
-    c.width = 1024; c.height = 3072;
-    const ctx = c.getContext('2d')!;
-    ctx.fillStyle = '#e5e1d8'; ctx.fillRect(0, 0, 1024, 1024);
-    ctx.fillStyle = 'rgba(0,0,0,0.08)'; ctx.font = '900 84px Helvetica, Arial, sans-serif'; ctx.textAlign = 'center'; ctx.fillText('STUDIO // МАСТЕРСКАЯ', 512, 540);
-    ctx.fillStyle = '#ff441f'; ctx.fillRect(0, 1020, 1024, 10);
-    ctx.fillStyle = '#1e1e24'; ctx.fillRect(0, 1030, 1024, 2042);
-
-    const letters = ['Г', 'А', 'Л', 'Е', 'Р', 'Е', 'Я'];
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.09)';
-    ctx.font = '900 240px Helvetica, Arial, sans-serif';
-    ctx.textAlign = 'center';
-    letters.forEach((char, idx) => { ctx.fillText(char, 512, 1340 + idx * 240); });
-
-    return new THREE.CanvasTexture(c);
-  }, []);
-
-  return (
-    <group>
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 10.5]}><planeGeometry args={[10, 31]} /><meshBasicMaterial map={floorTex} /></mesh>
-      <mesh position={[0, 2.5, -5]}><planeGeometry args={[10, 5]} /><meshStandardMaterial color="#ded9ce" /></mesh>
-      <mesh position={[-5, 2.5, 0]} rotation={[0, Math.PI / 2, 0]}><planeGeometry args={[10, 5]} /><meshStandardMaterial color="#d6d0c4" /></mesh>
-      <mesh position={[5, 2.5, 0]} rotation={[0, -Math.PI / 2, 0]}><planeGeometry args={[10, 5]} /><meshStandardMaterial color="#d6d0c4" /></mesh>
-      <mesh position={[-5, 2.5, 15.5]} rotation={[0, Math.PI / 2, 0]}><planeGeometry args={[21, 5]} /><meshStandardMaterial color="#2d2d35" /></mesh>
-      <mesh position={[5, 2.5, 15.5]} rotation={[0, -Math.PI / 2, 0]}><planeGeometry args={[21, 5]} /><meshStandardMaterial color="#2d2d35" /></mesh>
-      <mesh position={[0, 2.5, 26]} rotation={[0, Math.PI, 0]}><planeGeometry args={[10, 5]} /><meshStandardMaterial color="#1a1a22" /></mesh>
-
-      <group position={[0, 0.25, 0.5]}>
-        <mesh position={[0, 0.2, 0]}><boxGeometry args={[3.2, 0.14, 1]} /><meshStandardMaterial color="#1f1f23" roughness={0.4} /></mesh>
-        <mesh position={[-1.3, -0.05, 0]}><boxGeometry args={[0.12, 0.42, 0.85]} /><meshStandardMaterial color="#0e0e11" /></mesh>
-        <mesh position={[1.3, -0.05, 0]}><boxGeometry args={[0.12, 0.42, 0.85]} /><meshStandardMaterial color="#0e0e11" /></mesh>
-      </group>
-
-      {zSlots.map((z, i) => (
-        <group key={`l-${i}`} position={[-4.9, 2.3, z]} rotation={[0, Math.PI / 2, 0]}>
-          <PosterSlot poster={posters[i]} idx={i} />
-        </group>
-      ))}
-      {zSlots.map((z, i) => (
-        <group key={`r-${i}`} position={[4.9, 2.3, z]} rotation={[0, -Math.PI / 2, 0]}>
-          <PosterSlot poster={posters[i + 5]} idx={i + 5} />
-        </group>
-      ))}
-    </group>
-  );
-}
-
-function DPad({ keys }: { keys: MutableRefObject<MoveKeys> }) {
-  const press = (dir: keyof MoveKeys) => ({
-    onPointerDown: (e: ReactPointerEvent<HTMLButtonElement>) => {
-      e.preventDefault();
-      e.stopPropagation();
-      e.currentTarget.setPointerCapture(e.pointerId);
-      keys.current[dir] = 1;
-    },
-    onPointerUp: (e: ReactPointerEvent<HTMLButtonElement>) => {
-      e.preventDefault();
-      keys.current[dir] = 0;
-    },
-    onPointerCancel: () => { keys.current[dir] = 0; },
-    onContextMenu: (e: ReactMouseEvent) => e.preventDefault(),
-  });
-
-  const padBtn: CSSProperties = {
-    width: 62, height: 62, border: '1px solid rgba(255,255,255,0.28)',
-    borderRadius: 16, background: 'rgba(12,12,16,0.72)', color: '#fff',
-    fontSize: 22, fontWeight: 700, touchAction: 'none', userSelect: 'none',
-    WebkitUserSelect: 'none', display: 'grid', placeItems: 'center',
-    boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
-  };
-
-  return (
-    <div style={{
-      position: 'absolute', left: 'max(16px, env(safe-area-inset-left))',
-      bottom: 'max(20px, env(safe-area-inset-bottom))', zIndex: 25,
-      display: 'grid', gridTemplateColumns: '62px 62px 62px', gridTemplateRows: '62px 62px 62px',
-      gap: 8, pointerEvents: 'auto',
-    }}>
-      <span />
-      <button type="button" aria-label="Вперёд" style={padBtn} {...press('w')}>▲</button>
-      <span />
-      <button type="button" aria-label="Влево" style={padBtn} {...press('a')}>◀</button>
-      <span />
-      <button type="button" aria-label="Вправо" style={padBtn} {...press('d')}>▶</button>
-      <span />
-      <button type="button" aria-label="Назад" style={padBtn} {...press('s')}>▼</button>
-    </div>
-  );
-}
-
+// ----------------------------------------------------
+// 7. Главный компонент
+// ----------------------------------------------------
 export default function App() {
-  const isTouch = useTouchUi();
-  const keys = useRef<MoveKeys>({ w: 0, s: 0, a: 0, d: 0 });
-  const [mode, setMode] = useState<Mode>('walk');
-  const [zone, setZone] = useState<Zone>('none');
-  const [tool, setTool] = useState('brush');
-  const [color, setColor] = useState('#ff3b30');
-  const [size, setSize] = useState(20);
-  const [text, setText] = useState('DESIGN');
-  const [font, setFont] = useState('Helvetica, Arial, sans-serif');
-  const [modal, setModal] = useState(false);
-  const [author, setAuthor] = useState('Artgradis');
+  const [isMobile, setIsMobile] = useState(false);
 
-  const [posters, setPosters] = useState<Poster[]>(() => {
-    try { const d = localStorage.getItem(KEY); return d ? JSON.parse(d) : []; } catch { return []; }
+  // Общий реф состояния нажатий
+  const input = useRef<InputState>({
+    forward: false,
+    backward: false,
+    left: false,
+    right: false,
+    up: false,
+    down: false,
   });
 
-  const cvs = useMemo(() => {
-    const c = document.createElement('canvas'); c.width = 1024; c.height = 1024;
-    const ctx = c.getContext('2d')!;
-    ctx.fillStyle = '#141416'; ctx.fillRect(0, 0, 1024, 1024);
-    ctx.fillStyle = '#202024'; ctx.fillRect(40, 40, 944, 944);
-    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 54px monospace'; ctx.textAlign = 'center'; ctx.fillText('ARTGRADIS', 512, 470);
-    ctx.fillStyle = '#a1a1aa'; ctx.font = '24px monospace'; ctx.fillText('ЖМИ ПРОБЕЛ И СОЗДАВАЙ ПЛАКАТ', 512, 530);
-    return c;
+  // Автоопределение устройства (тач-экран или мобильная ширина)
+  useEffect(() => {
+    const checkDevice = () => {
+      const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+      const isNarrow = window.innerWidth <= 820;
+      setIsMobile(hasTouch || isNarrow);
+    };
+
+    checkDevice();
+    window.addEventListener('resize', checkDevice);
+    return () => window.removeEventListener('resize', checkDevice);
   }, []);
 
-  const tex = useMemo(() => new THREE.CanvasTexture(cvs), [cvs]);
-
-  const clear = () => {
-    const ctx = cvs.getContext('2d')!; ctx.fillStyle = '#141416'; ctx.fillRect(0, 0, 1024, 1024); tex.needsUpdate = true;
-  };
-
-  const saveToGallery = () => {
-    const p: Poster = { id: Date.now().toString(), image: cvs.toDataURL('image/png'), author: author.trim() || 'Anonymous', date: new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' }) };
-    setPosters((prev) => {
-      const upd = [p, ...prev].slice(0, 10);
-      try { localStorage.setItem(KEY, JSON.stringify(upd)); } catch (e) { console.warn(e); }
-      return upd;
-    });
-    setModal(false); setMode('walk');
-  };
-
+  // Слушатель клавиатуры (для ПК)
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'SELECT') return;
-      if (e.code === 'Space' && mode === 'walk') {
-        if (zone === 'center') { e.preventDefault(); setMode('paint_center'); }
-        else if (zone === 'left') { e.preventDefault(); setMode('view_left'); }
-        else if (zone === 'right') { e.preventDefault(); setMode('view_right'); }
-      } else if (e.key === 'Escape' && mode !== 'walk') {
-        setMode('walk'); setModal(false);
-      }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'ArrowUp' || e.code === 'KeyW') input.current.forward = true;
+      if (e.code === 'ArrowDown' || e.code === 'KeyS') input.current.backward = true;
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') input.current.left = true;
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') input.current.right = true;
+      if (e.code === 'Space') input.current.up = true;
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') input.current.down = true;
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [zone, mode]);
 
-  useEffect(() => {
-    if (mode !== 'walk') keys.current = { w: 0, s: 0, a: 0, d: 0 };
-    const clearKeys = () => { keys.current = { w: 0, s: 0, a: 0, d: 0 }; };
-    window.addEventListener('blur', clearKeys);
-    return () => window.removeEventListener('blur', clearKeys);
-  }, [mode]);
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'ArrowUp' || e.code === 'KeyW') input.current.forward = false;
+      if (e.code === 'ArrowDown' || e.code === 'KeyS') input.current.backward = false;
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') input.current.left = false;
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') input.current.right = false;
+      if (e.code === 'Space') input.current.up = false;
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') input.current.down = false;
+    };
 
-  const btn = (a: boolean): CSSProperties => ({
-    background: a ? '#ffffff' : 'rgba(255,255,255,0.1)', color: a ? '#000' : '#fff',
-    border: 'none', borderRadius: isTouch ? 16 : 14, padding: isTouch ? '12px 14px' : '6px 12px',
-    fontSize: isTouch ? 14 : 12, fontWeight: 600, cursor: 'pointer', minHeight: isTouch ? 44 : undefined,
-    touchAction: 'manipulation',
-  });
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
+  }, []);
 
-  const interactBtn = (bg: string, shadow: string): CSSProperties => ({
-    position: 'absolute',
-    bottom: isTouch ? 'max(28px, env(safe-area-inset-bottom))' : 40,
-    left: isTouch ? 'auto' : '50%',
-    right: isTouch ? 'max(16px, env(safe-area-inset-right))' : 'auto',
-    transform: isTouch ? 'none' : 'translateX(-50%)',
-    color: '#000', background: bg, fontWeight: 700,
-    fontSize: isTouch ? 16 : 15, padding: isTouch ? '16px 22px' : '14px 30px',
-    borderRadius: 30, border: 'none', cursor: 'pointer', boxShadow: shadow, zIndex: 20,
-    minHeight: 48, maxWidth: isTouch ? 200 : undefined, touchAction: 'manipulation',
-  });
+  // Хелпер для сенсорных кнопок
+  const handleTouch = (key: keyof InputState, active: boolean) => {
+    input.current[key] = active;
+  };
+
+  // Стиль для сенсорных круглых кнопок
+  const btnStyle = {
+    width: 54,
+    height: 54,
+    borderRadius: '50%',
+    background: 'rgba(255, 255, 255, 0.12)',
+    backdropFilter: 'blur(10px)',
+    border: '1px solid rgba(255, 255, 255, 0.25)',
+    color: '#ffffff',
+    fontSize: 20,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    userSelect: 'none' as const,
+    WebkitUserSelect: 'none' as const,
+    touchAction: 'none' as const,
+    cursor: 'pointer',
+    activeStyle: { background: 'rgba(0, 240, 255, 0.3)' }
+  };
 
   return (
-    <div style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', background: '#09090b', margin: 0, overflow: 'hidden' }}>
-      <div style={{ position: 'absolute', top: 'max(12px, env(safe-area-inset-top))', left: '50%', transform: 'translateX(-50%)', color: '#fff', fontSize: isTouch ? 12 : 13, fontWeight: 600, zIndex: 10, background: 'rgba(0,0,0,0.7)', padding: isTouch ? '8px 16px' : '8px 24px', borderRadius: 24, backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.15)', pointerEvents: 'none', maxWidth: '90vw', textAlign: 'center' }}>
-        {mode === 'walk' && (isTouch ? 'Мастерская и галерея. Двигайся стрелками' : 'Светлая Мастерская и Тёмная Галерея в едином зале! Управление: W, A, S, D')}
-        {mode === 'paint_center' && (isTouch ? 'Рисуй пальцем по плакату' : 'Редактор: создай плакат и нажми «Повесить в галерею»')}
-        {mode === 'view_left' && (isTouch ? 'Нажми на плакат — 4 режима физики' : 'Кинетика: кликай по плакату для переключения 4 режимов!')}
-        {mode === 'view_right' && (isTouch ? 'Нажми на артефакт, чтобы сменить форму' : '3D-Монолит: кликай по парящему артефакту для смены формы')}
-      </div>
-
-      {mode === 'walk' && zone === 'center' && (
-        <button onClick={() => setMode('paint_center')} style={interactBtn('#fff', '0 8px 30px rgba(255,255,255,0.3)')}>
-          {isTouch ? 'Открыть генератор' : '[ ПРОБЕЛ ] Открыть генератор плаката'}
-        </button>
-      )}
-      {mode === 'walk' && zone === 'left' && (
-        <button onClick={() => setMode('view_left')} style={interactBtn('#00f2fe', '0 8px 30px rgba(0,242,254,0.4)')}>
-          {isTouch ? 'Исследовать постер' : '[ ПРОБЕЛ ] Исследовать кинетический постер'}
-        </button>
-      )}
-      {mode === 'walk' && zone === 'right' && (
-        <button onClick={() => setMode('view_right')} style={interactBtn('#ffd60a', '0 8px 30px rgba(255,214,10,0.4)')}>
-          {isTouch ? 'Осмотреть монолит' : '[ ПРОБЕЛ ] Осмотреть 3D-монолит'}
-        </button>
-      )}
-
-      {(mode === 'view_left' || mode === 'view_right') && (
-        <button onClick={() => setMode('walk')} style={{ ...interactBtn('#fff', '0 8px 24px rgba(0,0,0,0.35)'), bottom: isTouch ? 'max(28px, env(safe-area-inset-bottom))' : 30 }}>
-          {isTouch ? 'Назад в зал' : '[ ESC ] Назад в зал'}
-        </button>
-      )}
-
-      {isTouch && mode === 'walk' && <DPad keys={keys} />}
-
-      {modal && (
-        <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', background: 'rgba(20,20,24,0.96)', padding: '28px 36px', borderRadius: '24px', border: '1px solid rgba(255,255,255,0.2)', zIndex: 50, display: 'flex', flexDirection: 'column', gap: '16px', textAlign: 'center', color: '#fff' }}>
-          <h3 style={{ margin: 0, fontSize: '20px' }}>🏛️ Повесить в галерею</h3>
-          <p style={{ margin: 0, fontSize: '13px', color: '#a1a1aa' }}>Постер появится в тёмной галерее. 11-й постер заменит самый старый.</p>
-          <input type="text" value={author} onChange={(e) => setAuthor(e.target.value)} placeholder="Имя автора..." style={{ background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.3)', borderRadius: '12px', padding: '10px 14px', color: '#fff', fontSize: '14px', outline: 'none', textAlign: 'center' }} />
-          <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
-            <button onClick={() => setModal(false)} style={{ background: 'transparent', color: '#aaa', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '16px', padding: '8px 18px', cursor: 'pointer' }}>Отмена</button>
-            <button onClick={saveToGallery} style={{ background: '#ff441f', color: '#fff', fontWeight: 700, border: 'none', borderRadius: '16px', padding: '8px 22px', cursor: 'pointer' }}>Повесить на стену</button>
-          </div>
+    <div style={{ width: '100vw', height: '100vh', background: '#0e1013', margin: 0, overflow: 'hidden', position: 'relative', touchAction: 'none' }}>
+      
+      {/* 1. Если зашли с ПК — показываем лаконичную клавиатурную подсказку */}
+      {!isMobile && (
+        <div style={{
+          position: 'absolute',
+          bottom: 24,
+          left: 24,
+          zIndex: 50,
+          background: 'rgba(15, 17, 22, 0.82)',
+          backdropFilter: 'blur(8px)',
+          border: '1px solid rgba(255,255,255,0.1)',
+          padding: '14px 20px',
+          borderRadius: 12,
+          color: '#d0d4dc',
+          fontFamily: 'sans-serif',
+          fontSize: 13,
+          lineHeight: 1.6,
+          pointerEvents: 'none',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
+        }}>
+          <div>🧭 <b>Стрелочки</b> (↑ ↓ ← →) — полет и поворот</div>
+          <div>🚀 <b>Space</b> — подъем, <b>Shift</b> — спуск</div>
         </div>
       )}
 
-      {mode === 'paint_center' && (
-        <div style={{ position: 'absolute', bottom: isTouch ? 'max(12px, env(safe-area-inset-bottom))' : 20, left: '50%', transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', gap: isTouch ? 8 : 10, alignItems: 'center', background: 'rgba(18,18,22,0.96)', padding: isTouch ? '12px 14px' : '14px 24px', borderRadius: 28, backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.18)', zIndex: 20, boxShadow: '0 16px 40px rgba(0,0,0,0.7)', width: isTouch ? 'min(100vw - 16px, 720px)' : undefined, maxHeight: isTouch ? '42vh' : undefined, overflowY: isTouch ? 'auto' : undefined }}>
-          <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' }}>
-            {[
-              ['brush','🖌 Кисть'],['spray','💨 Спрей'],['line','📏 Линия'],['rect','⬛ Прямоугольник'],
-              ['circle','⭕ Круг'],['stamp_cross','➕ Прицел'],['stamp_barcode','|||| Штрихкод'],['text','🔤 Текст']
-            ].map(([v, l]) => (
-              <button key={v} onClick={() => setTool(v)} style={btn(tool === v)}>{l}</button>
-            ))}
-            <select value={font} onChange={(e) => setFont(e.target.value)} style={{ background: 'rgba(255,255,255,0.12)', color: '#fff', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '12px', padding: '6px 10px', fontSize: '12px', outline: 'none', cursor: 'pointer' }}>
-              <option value="Helvetica, Arial, sans-serif" style={{ background: '#222' }}>Swiss Sans</option>
-              <option value="'Courier New', monospace" style={{ background: '#222' }}>Monospace</option>
-              <option value="Impact, Charcoal, sans-serif" style={{ background: '#222' }}>Impact Black</option>
-              <option value="Georgia, serif" style={{ background: '#222' }}>Editorial Serif</option>
-            </select>
-            {tool === 'text' && (
-              <input type="text" value={text} onChange={(e) => setText(e.target.value)} placeholder="Текст..." style={{ background: 'rgba(255,255,255,0.12)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '12px', color: '#fff', padding: '6px 10px', fontSize: '12px', width: '110px', outline: 'none' }} />
-            )}
+      {/* 2. Если зашли с Мобильного — показываем экранный джойстик */}
+      {isMobile && (
+        <>
+          {/* Слева: D-Pad движения */}
+          <div style={{
+            position: 'absolute',
+            bottom: 30,
+            left: 24,
+            zIndex: 60,
+            display: 'grid',
+            gridTemplateColumns: 'repeat(3, 56px)',
+            gridTemplateRows: 'repeat(3, 56px)',
+            gap: 6,
+            touchAction: 'none'
+          }}>
+            <div />
+            <button
+              style={btnStyle}
+              onTouchStart={() => handleTouch('forward', true)}
+              onTouchEnd={() => handleTouch('forward', false)}
+            >▲</button>
+            <div />
+
+            <button
+              style={btnStyle}
+              onTouchStart={() => handleTouch('left', true)}
+              onTouchEnd={() => handleTouch('left', false)}
+            >◀</button>
+            <div />
+            <button
+              style={btnStyle}
+              onTouchStart={() => handleTouch('right', true)}
+              onTouchEnd={() => handleTouch('right', false)}
+            >▶</button>
+
+            <div />
+            <button
+              style={btnStyle}
+              onTouchStart={() => handleTouch('backward', true)}
+              onTouchEnd={() => handleTouch('backward', false)}
+            >▼</button>
+            <div />
           </div>
 
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' }}>
-            <div style={{ display: 'flex', gap: '5px' }}>
-              {COLORS.map((c) => (
-                <button key={c} onClick={() => setColor(c)} style={{ width: isTouch ? 32 : 22, height: isTouch ? 32 : 22, borderRadius: '50%', background: c, border: color === c ? '2px solid #ffffff' : '1px solid rgba(255,255,255,0.2)', cursor: 'pointer', transform: color === c ? 'scale(1.15)' : 'scale(1)', transition: '0.1s', touchAction: 'manipulation' }} />
-              ))}
-            </div>
-            <div style={{ width: 1, height: 18, background: 'rgba(255,255,255,0.2)' }} />
-            <span style={{ color: '#888', fontSize: '11px' }}>Толщина:</span>
-            <input type="range" min="4" max="60" value={size} onChange={(e) => setSize(Number(e.target.value))} style={{ width: 65, cursor: 'pointer' }} />
-            <button onClick={() => setModal(true)} style={{ background: '#00f2fe', color: '#000', fontWeight: 700, border: 'none', borderRadius: 14, padding: isTouch ? '12px 14px' : '6px 14px', fontSize: isTouch ? 14 : 12, cursor: 'pointer', boxShadow: '0 4px 15px rgba(0,242,254,0.35)', minHeight: isTouch ? 44 : undefined }}>🏛️ Повесить в галерею</button>
-            <button onClick={clear} style={{ background: 'transparent', color: '#a1a1aa', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 14, padding: isTouch ? '12px 12px' : '6px 10px', fontSize: isTouch ? 14 : 12, cursor: 'pointer', minHeight: isTouch ? 44 : undefined }}>Стереть</button>
-            <button onClick={() => { const a = document.createElement('a'); a.download = 'artgradis-poster.png'; a.href = cvs.toDataURL('image/png'); a.click(); }} style={{ background: '#ff441f', color: '#fff', fontWeight: 600, border: 'none', borderRadius: 14, padding: isTouch ? '12px 14px' : '6px 12px', fontSize: isTouch ? 14 : 12, cursor: 'pointer', minHeight: isTouch ? 44 : undefined }}>💾 PNG</button>
-            <button onClick={() => setMode('walk')} style={{ background: '#ffffff', color: '#000000', fontWeight: 600, border: 'none', borderRadius: 14, padding: isTouch ? '12px 14px' : '6px 14px', fontSize: isTouch ? 14 : 12, cursor: 'pointer', minHeight: isTouch ? 44 : undefined }}>{isTouch ? 'Отойти' : '[ESC] Отойти'}</button>
+          {/* Справа: Кнопки высоты (Вверх / Вниз) */}
+          <div style={{
+            position: 'absolute',
+            bottom: 40,
+            right: 28,
+            zIndex: 60,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 16,
+            touchAction: 'none'
+          }}>
+            <button
+              style={{ ...btnStyle, width: 62, height: 62, background: 'rgba(0, 240, 255, 0.2)', border: '1px solid rgba(0, 240, 255, 0.5)' }}
+              onTouchStart={() => handleTouch('up', true)}
+              onTouchEnd={() => handleTouch('up', false)}
+            >
+              UP
+            </button>
+            <button
+              style={{ ...btnStyle, width: 62, height: 62 }}
+              onTouchStart={() => handleTouch('down', true)}
+              onTouchEnd={() => handleTouch('down', false)}
+            >
+              DN
+            </button>
           </div>
-        </div>
+        </>
       )}
 
       <Canvas
-        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', display: 'block', touchAction: 'none' }}
-        gl={{ antialias: true, alpha: false }}
-        dpr={[1, 1.75]}
-        resize={{ debounce: 0 }}
+        shadows
+        camera={{ position: [0, 2.5, 6], fov: 50 }}
+        gl={{
+          antialias: true,
+          toneMapping: THREE.ACESFilmicToneMapping,
+          toneMappingExposure: 1.0,
+        }}
       >
-        <PerspectiveCamera makeDefault fov={65} near={0.1} far={100} />
-        <ambientLight intensity={0.9} />
-        <pointLight position={[0, 4.2, 0]} intensity={1.5} />
-        <pointLight position={[0, 3.5, -3.2]} intensity={2.2} color="#ffffff" />
-        <pointLight position={[-3.5, 3.2, -1]} intensity={1.8} color="#00f2fe" />
-        <pointLight position={[3.5, 3.2, -1]} intensity={1.8} color="#ffd60a" />
-        <pointLight position={[0, 4, 10]} intensity={1.8} />
-        <pointLight position={[0, 4, 17]} intensity={1.8} />
-        <pointLight position={[0, 4, 23]} intensity={1.8} />
+        <ResponsiveCamera />
+        <Lighting />
 
-        <Player mode={mode} setZone={setZone} keys={keys} />
-        <MainPoster tex={tex} cvs={cvs} mode={mode} tool={tool} color={color} size={size} text={text} font={font} />
-        <LeftPoster mode={mode} />
-        <RightSculpture mode={mode} />
-        <Hall posters={posters} />
+        <Suspense fallback={null}>
+          <Room />
+          <Drone input={input} />
+        </Suspense>
       </Canvas>
     </div>
   );
