@@ -539,6 +539,51 @@ export default function App() {
     return () => window.removeEventListener('resize', checkDevice);
   }, []);
 
+    // Фоновая музыка бутика
+    const [isMuted, setIsMuted] = useState(true);
+    const audioRef = useRef<HTMLAudioElement | null>(null);
+  
+    // Инициализация аудио и попытка плавного старта при первом же клике/касании
+    useEffect(() => {
+      const audio = new Audio('/music.mp3');
+      audio.loop = true;
+      audio.volume = 0.45; // Мягкая ненавязчивая громкость 45%
+      audioRef.current = audio;
+  
+      const startAudioOnFirstInteraction = () => {
+        if (audioRef.current) {
+          audioRef.current.play().then(() => {
+            setIsMuted(false);
+          }).catch(() => {
+            // Если браузер заблокировал до клика по кнопке
+          });
+        }
+        window.removeEventListener('pointerdown', startAudioOnFirstInteraction);
+        window.removeEventListener('keydown', startAudioOnFirstInteraction);
+      };
+  
+      window.addEventListener('pointerdown', startAudioOnFirstInteraction, { once: true });
+      window.addEventListener('keydown', startAudioOnFirstInteraction, { once: true });
+  
+      return () => {
+        audio.pause();
+        audio.src = '';
+      };
+    }, []);
+  
+    // Переключение звука кнопкой
+    const toggleSound = (e: React.MouseEvent | React.TouchEvent) => {
+      e.stopPropagation(); // Чтобы клик по кнопке не двигал дрон
+      if (!audioRef.current) return;
+  
+      if (isMuted) {
+        audioRef.current.play().then(() => setIsMuted(false)).catch(console.error);
+      } else {
+        audioRef.current.pause();
+        setIsMuted(true);
+      }
+    };
+
   // Клавиатура (ПК)
   useEffect(() => {
     const keys = { w: false, s: false, a: false, d: false };
@@ -738,7 +783,38 @@ export default function App() {
           Коснитесь экрана в любом месте для управления
         </div>
       )}
-
+      {/* Кнопка включения/выключения музыки бутика */}
+      <button
+        onClick={toggleSound}
+        onTouchEnd={toggleSound}
+        style={{
+          position: 'absolute',
+          top: 20,
+          right: 20,
+          zIndex: 90,
+          width: 48,
+          height: 48,
+          borderRadius: '50%',
+          background: isMuted ? 'rgba(15, 17, 22, 0.65)' : 'rgba(0, 240, 255, 0.15)',
+          backdropFilter: 'blur(10px)',
+          WebkitBackdropFilter: 'blur(10px)',
+          border: isMuted ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid rgba(0, 240, 255, 0.6)',
+          boxShadow: isMuted ? 'none' : '0 0 15px rgba(0, 240, 255, 0.3)',
+          color: isMuted ? '#8e96a4' : '#00f0ff',
+          fontSize: 18,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: 'pointer',
+          outline: 'none',
+          transition: 'all 0.3s ease',
+          pointerEvents: 'auto',
+        }}
+        title={isMuted ? 'Включить музыку' : 'Выключить музыку'}
+      >
+        {isMuted ? '🔇' : '🔊'}
+      </button>
+      
       <Canvas
         shadows={{ type: THREE.PCFSoftShadowMap }}
         dpr={[1, 1.5]}
