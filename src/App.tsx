@@ -1,10 +1,10 @@
 import { Suspense, useMemo, useEffect, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { useGLTF, useProgress, Html } from '@react-three/drei';
+import { useGLTF, useProgress, Html, useTexture } from '@react-three/drei';
 import * as THREE from 'three';
 
 // ----------------------------------------------------
-// 0. Экран загрузки
+// 0. Экран загрузки моделей и текстур
 // ----------------------------------------------------
 function Loader() {
   const { progress } = useProgress();
@@ -17,7 +17,7 @@ function Loader() {
         justifyContent: 'center',
         color: '#00f0ff',
         fontFamily: 'sans-serif',
-        fontSize: 14,
+        fontSize: 13,
         letterSpacing: 2,
         textTransform: 'uppercase',
         userSelect: 'none',
@@ -44,33 +44,30 @@ function Loader() {
 }
 
 // ----------------------------------------------------
-// 1. Интерфейс контроллера
+// 1. Интерфейс контроллера (Только горизонтальный полет)
 // ----------------------------------------------------
 interface InputState {
   forward: boolean;
   backward: boolean;
   left: boolean;
   right: boolean;
-  up: boolean;
-  down: boolean;
 }
 
 // ----------------------------------------------------
-// 2. Адаптивная камера
+// 2. Широкоугольная адаптивная камера
 // ----------------------------------------------------
 function ResponsiveCamera() {
   const { camera, size } = useThree();
   useEffect(() => {
     const isMobile = size.width < 768;
-    // Оптимальный угол обзора для вертикальных и горизонтальных экранов
-    (camera as THREE.PerspectiveCamera).fov = isMobile ? 55 : 50;
+    (camera as THREE.PerspectiveCamera).fov = isMobile ? 78 : 68;
     camera.updateProjectionMatrix();
   }, [camera, size]);
   return null;
 }
 
 // ----------------------------------------------------
-// 3. Персонаж-робот (Дрон)
+// 3. Персонаж-робот (Строгая фиксация высоты + защита от проемов и колец)
 // ----------------------------------------------------
 function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
   const { scene: botScene } = useGLTF('/bot.glb');
@@ -87,13 +84,16 @@ function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
     return meshes;
   }, [roomScene]);
 
-  const DRONE_RADIUS = 0.4;
+  const BODY_RADIUS = 0.55;
+  const FIXED_HOVER_Y = 1.15;
+
   const raycaster = useMemo(() => new THREE.Raycaster(), []);
-  const downDir = useMemo(() => new THREE.Vector3(0, -1, 0), []);
-  const rayDir = useMemo(() => new THREE.Vector3(), []);
+  const forwardDir = useMemo(() => new THREE.Vector3(), []);
+  const sideDir = useMemo(() => new THREE.Vector3(), []);
+  const probePos = useMemo(() => new THREE.Vector3(), []);
 
   const state = useRef({
-    pos: new THREE.Vector3(0, 1.2, 2.0),
+    pos: new THREE.Vector3(0, FIXED_HOVER_Y, 2.0),
     angle: 0,
     tilt: 0,
     roll: 0,
@@ -109,6 +109,34 @@ function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
       }
     });
   }, [botScene]);
+
+  // Проверка движения по всей ширине корпуса (не дает протиснуться в узкие дыры)
+  const canMoveForward = (fromPos: THREE.Vector3, moveDist: number, moveAngle: number): boolean => {
+    const dirX = Math.sin(moveAngle);
+    const dirZ = Math.cos(moveAngle);
+    forwardDir.set(dirX, 0, dirZ);
+    sideDir.set(-dirZ, 0, dirX);
+
+    const offsets = [-BODY_RADIUS, -BODY_RADIUS * 0.5, 0, BODY_RADIUS * 0.5, BODY_RADIUS];
+
+    for (const off of offsets) {
+      probePos.copy(fromPos);
+      probePos.x += sideDir.x * off;
+      probePos.z += sideDir.z * off;
+
+      for (const h of [-0.2, 0, 0.2]) {
+        probePos.y = FIXED_HOVER_Y + h;
+        raycaster.set(probePos, forwardDir);
+        raycaster.far = Math.abs(moveDist) + 0.35;
+
+        const hits = raycaster.intersectObjects(roomMeshes, true);
+        if (hits.length > 0) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
 
   useFrame((stateThree, delta) => {
     if (!groupRef.current) return;
@@ -140,54 +168,45 @@ function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
       targetTilt = -0.12;
     }
 
-    const moveX = Math.sin(s.angle) * forwardSpeed * delta;
-    const moveZ = Math.cos(s.angle) * forwardSpeed * delta;
+    if (forwardSpeed !== 0) {
+      const step = forwardSpeed * delta;
+      const moveAngle = forwardSpeed > 0 ? s.angle : s.angle + Math.PI;
 
-    s.pos.x += moveX;
-    s.pos.z += moveZ;
+      if (canMoveForward(s.pos, Math.abs(step), moveAngle)) {
+        s.pos.x += Math.sin(s.angle) * step;
+        s.pos.z += Math.cos(s.angle) * step;
+      }
+    }
 
-    // 3. Отталкивание от стен
-    for (let i = 0; i < 8; i++) {
-      const a = (i * Math.PI) / 4;
+    // 3. Выталкивание от близких стен
+    const rayDir = new THREE.Vector3();
+    for (let i = 0; i < 16; i++) {
+      const a = (i * Math.PI) / 8;
       rayDir.set(Math.cos(a), 0, Math.sin(a));
-      raycaster.set(s.pos, rayDir);
-      raycaster.far = DRONE_RADIUS;
+      raycaster.set(new THREE.Vector3(s.pos.x, FIXED_HOVER_Y, s.pos.z), rayDir);
+      raycaster.far = BODY_RADIUS;
+
       const hits = raycaster.intersectObjects(roomMeshes, true);
       if (hits.length > 0) {
         const hit = hits[0];
-        if (hit.face && Math.abs(hit.face.normal.y) < 0.7) {
-          const penetration = DRONE_RADIUS - hit.distance;
-          if (penetration > 0) {
-            s.pos.x += hit.face.normal.x * penetration;
-            s.pos.z += hit.face.normal.z * penetration;
-          }
+        const penetration = BODY_RADIUS - hit.distance;
+        if (penetration > 0) {
+          const nx = hit.face ? hit.face.normal.x : -rayDir.x;
+          const nz = hit.face ? hit.face.normal.z : -rayDir.z;
+          const len = Math.hypot(nx, nz) || 1;
+
+          s.pos.x += (nx / len) * (penetration + 0.005);
+          s.pos.z += (nz / len) * (penetration + 0.005);
         }
       }
     }
 
-    // 4. Подъем и спуск
-    let moveY = 0;
-    if (inp.up) moveY += 1.8 * delta;
-    if (inp.down) moveY -= 1.8 * delta;
-    s.pos.y += moveY;
+    // 4. Фиксация высоты
+    s.pos.y = FIXED_HOVER_Y;
 
-    // 5. Ограничение высоты
-    raycaster.set(new THREE.Vector3(s.pos.x, s.pos.y + 1.0, s.pos.z), downDir);
-    raycaster.far = 10;
-    const floorHits = raycaster.intersectObjects(roomMeshes, true);
-
-    let currentFloorY = -1.0;
-    if (floorHits.length > 0) {
-      currentFloorY = floorHits[0].point.y;
-    }
-
-    const minHeight = currentFloorY + 0.35;
-    const maxHeight = 2.6;
-    s.pos.y = THREE.MathUtils.clamp(s.pos.y, minHeight, maxHeight);
-
-    // 6. Покачивание
-    const hoverY = Math.sin(time * 3) * 0.035;
-    const hoverWobble = Math.cos(time * 2) * 0.015;
+    // 5. Покачивание
+    const hoverY = Math.sin(time * 3) * 0.03;
+    const hoverWobble = Math.cos(time * 2) * 0.012;
 
     s.tilt = THREE.MathUtils.lerp(s.tilt, targetTilt, 0.1);
     s.roll = THREE.MathUtils.lerp(s.roll, targetRoll, 0.1);
@@ -195,10 +214,10 @@ function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
     groupRef.current.position.set(s.pos.x, s.pos.y + hoverY, s.pos.z);
     groupRef.current.rotation.set(s.tilt, s.angle + hoverWobble, s.roll, 'YXZ');
 
-    // 7. Улучшенная камера: на мобильных отодвигаем и поднимаем выше
+    // 6. Широкоугольная камера
     const isNarrow = stateThree.size.width < 768;
-    const cameraDistance = isNarrow ? 5.6 : 3.6; // на телефоне отодвигаем дальше
-    const cameraHeight = isNarrow ? 2.3 : 1.3;   // на телефоне поднимаем выше
+    const cameraDistance = isNarrow ? 6.8 : 5.2;
+    const cameraHeight = isNarrow ? 2.5 : 1.9;
 
     const idealCamX = s.pos.x - Math.sin(s.angle) * cameraDistance;
     const idealCamZ = s.pos.z - Math.cos(s.angle) * cameraDistance;
@@ -213,18 +232,15 @@ function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
 
     let actualCamPos = idealCamPos;
     if (camHits.length > 0) {
-      actualCamPos = s.pos.clone().addScaledVector(camDir, Math.max(1.2, camHits[0].distance - 0.25));
+      actualCamPos = s.pos.clone().addScaledVector(camDir, Math.max(1.5, camHits[0].distance - 0.25));
     }
 
     stateThree.camera.position.lerp(actualCamPos, 0.08);
 
-    // Точка взгляда: на телефоне смотрим чуть ниже робота, 
-    // чтобы визуально поднять самого робота в верхнюю половину экрана!
-    const lookAtOffsetY = isNarrow ? -0.3 : 0.2;
     stateThree.camera.lookAt(
-      s.pos.x + Math.sin(s.angle) * 1.5,
-      s.pos.y + lookAtOffsetY,
-      s.pos.z + Math.cos(s.angle) * 1.5
+      s.pos.x + Math.sin(s.angle) * 2.0,
+      s.pos.y + 0.2,
+      s.pos.z + Math.cos(s.angle) * 2.0
     );
   });
 
@@ -332,7 +348,129 @@ function Room() {
 useGLTF.preload('/room.glb');
 
 // ----------------------------------------------------
-// 6. Освещение
+// 6. Компонент статичного арта из прозрачного PNG
+// ----------------------------------------------------
+interface WallDecalProps {
+  url: string;
+  position: [number, number, number];
+  rotation: [number, number, number];
+  size?: [number, number];
+  opacity?: number;
+}
+
+function WallDecal({ url, position, rotation, size = [2.6, 2.6], opacity = 1.0 }: WallDecalProps) {
+  const texture = useTexture(url);
+
+  useMemo(() => {
+    if (texture) {
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.needsUpdate = true;
+    }
+  }, [texture]);
+
+  const [w, h] = size;
+
+  return (
+    <mesh position={position} rotation={rotation} receiveShadow>
+      <planeGeometry args={[w, h]} />
+      <meshStandardMaterial
+        map={texture}
+        transparent={true}
+        alphaTest={0.02}
+        opacity={opacity}
+        roughness={0.8}
+        metalness={0.05}
+        depthWrite={true}
+        polygonOffset={true}
+        polygonOffsetFactor={-1}
+        polygonOffsetUnits={-1}
+        side={THREE.DoubleSide}
+      />
+    </mesh>
+  );
+}
+
+// ----------------------------------------------------
+// 7. Компонент покадровой анимации (Идеальная прозрачность)
+// ----------------------------------------------------
+interface AnimatedWallDecalProps {
+  urls: string[];
+  position: [number, number, number];
+  rotation: [number, number, number];
+  size?: [number, number];
+  fps?: number;
+  opacity?: number;
+}
+
+function AnimatedWallDecal({
+  urls,
+  position,
+  rotation,
+  size = [1, 1],
+  fps = 8,
+  opacity = 1.0,
+}: AnimatedWallDecalProps) {
+  const textures = useTexture(urls);
+  const [frameIndex, setFrameIndex] = useState(0);
+
+  // Настраиваем свойства для каждой текстуры
+  const texList = useMemo(() => {
+    const list = (Array.isArray(textures) ? textures : [textures]) as THREE.Texture[];
+    list.forEach((tex) => {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.generateMipmaps = true;
+      tex.needsUpdate = true;
+    });
+    return list;
+  }, [textures]);
+
+  // Создаем готовые материалы с идеальной прозрачностью для каждого кадра
+  const materials = useMemo(() => {
+    return texList.map(
+      (tex) =>
+        new THREE.MeshStandardMaterial({
+          map: tex,
+          transparent: true,
+          alphaTest: 0.05,       // Четко отсекает прозрачные пиксели
+          opacity: opacity,
+          roughness: 0.8,
+          metalness: 0.05,
+          depthWrite: false,     // Отключаем depthWrite, чтобы прозрачный фон не превращался в серый щит!
+          polygonOffset: true,
+          polygonOffsetFactor: -1,
+          polygonOffsetUnits: -1,
+          side: THREE.DoubleSide,
+        })
+    );
+  }, [texList, opacity]);
+
+  // Таймер переключения кадров
+  useEffect(() => {
+    if (!urls || urls.length <= 1) return;
+    const interval = 1000 / fps;
+    const timer = setInterval(() => {
+      setFrameIndex((prev) => (prev + 1) % urls.length);
+    }, interval);
+    return () => clearInterval(timer);
+  }, [urls, fps]);
+
+  const [w, h] = size;
+  const currentMaterial = materials[frameIndex] || materials[0];
+
+  return (
+    <mesh
+      position={position}
+      rotation={rotation}
+      material={currentMaterial}
+      receiveShadow
+    >
+      <planeGeometry args={[w, h]} />
+    </mesh>
+  );
+}
+
+// ----------------------------------------------------
+// 8. Реалистичное галерейное освещение
 // ----------------------------------------------------
 function Lighting() {
   const lightRef = useRef<THREE.DirectionalLight>(null!);
@@ -346,38 +484,45 @@ function Lighting() {
 
   return (
     <>
-      <primitive object={target} position={[0, 0.5, 0]} />
+      <primitive object={target} position={[0, 0, 0]} />
 
-      <ambientLight intensity={0.1} color="#cad2df" />
+      <hemisphereLight
+        color="#d8e4f5"
+        groundColor="#3d4048"
+        intensity={1.4}
+      />
+
+      <ambientLight intensity={0.4} color="#e0e6ed" />
 
       <directionalLight
         ref={lightRef}
         castShadow
-        position={[0, 16.5, -0.5]}
-        intensity={3.6}
+        position={[4, 18, -2]}
+        intensity={2.4}
         color="#ffffff"
-        shadow-mapSize-width={1024}
-        shadow-mapSize-height={1024}
-        shadow-bias={-0.0002}
-        shadow-camera-near={0.5}
-        shadow-camera-far={45}
-        shadow-camera-left={-20}
-        shadow-camera-right={20}
-        shadow-camera-top={20}
-        shadow-camera-bottom={-20}
+        shadow-mapSize-width={2048}
+        shadow-mapSize-height={2048}
+        shadow-bias={-0.00015}
+        shadow-normalBias={0.04}
+        shadow-camera-near={1}
+        shadow-camera-far={40}
+        shadow-camera-left={-16}
+        shadow-camera-right={16}
+        shadow-camera-top={16}
+        shadow-camera-bottom={-16}
       />
 
       <directionalLight
-        position={[8, 5, -8]}
-        intensity={0.8}
-        color="#c0d4ec"
+        position={[-8, 6, 8]}
+        intensity={0.6}
+        color="#9fb8d4"
       />
     </>
   );
 }
 
 // ----------------------------------------------------
-// 7. Главный компонент
+// 9. Главный компонент
 // ----------------------------------------------------
 export default function App() {
   const [isMobile, setIsMobile] = useState(false);
@@ -387,8 +532,6 @@ export default function App() {
     backward: false,
     left: false,
     right: false,
-    up: false,
-    down: false,
   });
 
   useEffect(() => {
@@ -410,8 +553,6 @@ export default function App() {
       if (e.code === 'ArrowDown' || e.code === 'KeyS') input.current.backward = true;
       if (e.code === 'ArrowLeft' || e.code === 'KeyA') input.current.left = true;
       if (e.code === 'ArrowRight' || e.code === 'KeyD') input.current.right = true;
-      if (e.code === 'Space') input.current.up = true;
-      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') input.current.down = true;
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
@@ -419,8 +560,6 @@ export default function App() {
       if (e.code === 'ArrowDown' || e.code === 'KeyS') input.current.backward = false;
       if (e.code === 'ArrowLeft' || e.code === 'KeyA') input.current.left = false;
       if (e.code === 'ArrowRight' || e.code === 'KeyD') input.current.right = false;
-      if (e.code === 'Space') input.current.up = false;
-      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') input.current.down = false;
     };
 
     window.addEventListener('keydown', onKeyDown);
@@ -436,14 +575,14 @@ export default function App() {
   };
 
   const btnStyle = {
-    width: 52,
-    height: 52,
+    width: 54,
+    height: 54,
     borderRadius: '50%',
     background: 'rgba(255, 255, 255, 0.14)',
     backdropFilter: 'blur(10px)',
     border: '1px solid rgba(255, 255, 255, 0.28)',
     color: '#ffffff',
-    fontSize: 18,
+    fontSize: 20,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -465,7 +604,7 @@ export default function App() {
       WebkitUserSelect: 'none',
       touchAction: 'none'
     }}>
-      {/* Скрываем назойливую плашку Netlify */}
+      {/* Скрываем плашку Netlify */}
       <style>{`
         [id*="netlify"], iframe[src*="netlify"], .netlify-badge {
           display: none !important;
@@ -495,98 +634,66 @@ export default function App() {
           boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
         }}>
           <div>🧭 <b>Стрелочки</b> (↑ ↓ ← →) — полет и поворот</div>
-          <div>🚀 <b>Space</b> — подъем, <b>Shift</b> — спуск</div>
         </div>
       )}
 
-      {/* Сенсорные контроллеры — подняты выше зоны панелей */}
+      {/* Сенсорный D-Pad для мобильных */}
       {isMobile && (
-        <>
-          {/* D-Pad слева — поднят на 95px от низа */}
-          <div style={{
-            position: 'absolute',
-            bottom: 95,
-            left: 20,
-            zIndex: 60,
-            display: 'grid',
-            gridTemplateColumns: 'repeat(3, 52px)',
-            gridTemplateRows: 'repeat(3, 52px)',
-            gap: 6,
-            touchAction: 'none'
-          }}>
-            <div />
-            <button
-              style={btnStyle}
-              onTouchStart={(e) => { e.preventDefault(); handleTouch('forward', true); }}
-              onTouchEnd={(e) => { e.preventDefault(); handleTouch('forward', false); }}
-              onTouchCancel={() => handleTouch('forward', false)}
-            >▲</button>
-            <div />
+        <div style={{
+          position: 'absolute',
+          bottom: 90,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 60,
+          display: 'grid',
+          gridTemplateColumns: 'repeat(3, 56px)',
+          gridTemplateRows: 'repeat(3, 56px)',
+          gap: 8,
+          touchAction: 'none'
+        }}>
+          <div />
+          <button
+            style={btnStyle}
+            onTouchStart={(e) => { e.preventDefault(); handleTouch('forward', true); }}
+            onTouchEnd={(e) => { e.preventDefault(); handleTouch('forward', false); }}
+            onTouchCancel={() => handleTouch('forward', false)}
+          >▲</button>
+          <div />
 
-            <button
-              style={btnStyle}
-              onTouchStart={(e) => { e.preventDefault(); handleTouch('left', true); }}
-              onTouchEnd={(e) => { e.preventDefault(); handleTouch('left', false); }}
-              onTouchCancel={() => handleTouch('left', false)}
-            >◀</button>
-            <div />
-            <button
-              style={btnStyle}
-              onTouchStart={(e) => { e.preventDefault(); handleTouch('right', true); }}
-              onTouchEnd={(e) => { e.preventDefault(); handleTouch('right', false); }}
-              onTouchCancel={() => handleTouch('right', false)}
-            >▶</button>
+          <button
+            style={btnStyle}
+            onTouchStart={(e) => { e.preventDefault(); handleTouch('left', true); }}
+            onTouchEnd={(e) => { e.preventDefault(); handleTouch('left', false); }}
+            onTouchCancel={() => handleTouch('left', false)}
+          >◀</button>
+          <div />
+          <button
+            style={btnStyle}
+            onTouchStart={(e) => { e.preventDefault(); handleTouch('right', true); }}
+            onTouchEnd={(e) => { e.preventDefault(); handleTouch('right', false); }}
+            onTouchCancel={() => handleTouch('right', false)}
+          >▶</button>
 
-            <div />
-            <button
-              style={btnStyle}
-              onTouchStart={(e) => { e.preventDefault(); handleTouch('backward', true); }}
-              onTouchEnd={(e) => { e.preventDefault(); handleTouch('backward', false); }}
-              onTouchCancel={() => handleTouch('backward', false)}
-            >▼</button>
-            <div />
-          </div>
-
-          {/* Кнопки высоты справа — подняты на 110px от низа */}
-          <div style={{
-            position: 'absolute',
-            bottom: 110,
-            right: 22,
-            zIndex: 60,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 16,
-            touchAction: 'none'
-          }}>
-            <button
-              style={{ ...btnStyle, width: 58, height: 58, background: 'rgba(0, 240, 255, 0.25)', border: '1px solid rgba(0, 240, 255, 0.6)' }}
-              onTouchStart={(e) => { e.preventDefault(); handleTouch('up', true); }}
-              onTouchEnd={(e) => { e.preventDefault(); handleTouch('up', false); }}
-              onTouchCancel={() => handleTouch('up', false)}
-            >
-              UP
-            </button>
-            <button
-              style={{ ...btnStyle, width: 58, height: 58 }}
-              onTouchStart={(e) => { e.preventDefault(); handleTouch('down', true); }}
-              onTouchEnd={(e) => { e.preventDefault(); handleTouch('down', false); }}
-              onTouchCancel={() => handleTouch('down', false)}
-            >
-              DN
-            </button>
-          </div>
-        </>
+          <div />
+          <button
+            style={btnStyle}
+            onTouchStart={(e) => { e.preventDefault(); handleTouch('backward', true); }}
+            onTouchEnd={(e) => { e.preventDefault(); handleTouch('backward', false); }}
+            onTouchCancel={() => handleTouch('backward', false)}
+          >▼</button>
+          <div />
+        </div>
       )}
 
       <Canvas
-        shadows
+        shadows={{ type: THREE.PCFSoftShadowMap }}
         dpr={[1, 1.5]}
-        camera={{ position: [0, 2.5, 6], fov: 50 }}
+        camera={{ position: [0, 2.5, 6], fov: 68 }}
         gl={{
           antialias: true,
           powerPreference: 'high-performance',
           toneMapping: THREE.ACESFilmicToneMapping,
-          toneMappingExposure: 1.0,
+          toneMappingExposure: 1.1,
         }}
       >
         <ResponsiveCamera />
@@ -595,6 +702,81 @@ export default function App() {
         <Suspense fallback={<Loader />}>
           <Room />
           <Drone input={input} />
+
+          {/* ====================================================
+              СТАТИЧНЫЕ ИЗОБРАЖЕНИЯ (p1 - p6)
+              Шпаргалка поворотов rotation: [X, Y, Z]:
+              - На дальнюю стену:  rotation={[0, 0, 0]}
+              - На ближнюю стену:  rotation={[0, Math.PI, 0]}
+              - На правую стену:   rotation={[0, -Math.PI / 2, 0]}
+              - На левую стену:    rotation={[0, Math.PI / 2, 0]}
+             ==================================================== */}
+
+          {/* 1. Изображение p1.png */}
+          <WallDecal
+            url="/p1.png"
+            position={[6.5, 2.25, -13.39]}
+            rotation={[0, 0, 0]}
+            size={[15, 5]}
+          />
+
+          {/* 2. Изображение p2.png */}
+          <WallDecal
+            url="/p2.png"
+            position={[-3, 0, 6.5]}
+            rotation={[1.5708, 3.1415, 0]}
+            size={[15, 7.5]}
+          />
+
+          {/* 3. Изображение p3.png */}
+          <WallDecal
+            url="/p3.png"
+            position={[0, 0, 0]}
+            rotation={[0, 0, 0]}
+            size={[2.5, 2.5]}
+          />
+
+          {/* 4. Изображение p4.png */}
+          <WallDecal
+            url="/p4.png"
+            position={[0, 0, 0]}
+            rotation={[0, 0, 0]}
+            size={[2.5, 2.5]}
+          />
+
+          {/* 5. Изображение p5.png */}
+          <WallDecal
+            url="/p5.png"
+            position={[0, 0, 0]}
+            rotation={[0, 0, 0]}
+            size={[2.5, 2.5]}
+          />
+
+          {/* 6. Изображение p6.png */}
+          <WallDecal
+            url="/p6.png"
+            position={[0, 0, 0]}
+            rotation={[0, 0, 0]}
+            size={[2.5, 2.5]}
+          />
+
+          {/* ====================================================
+              ПОКАДРОВАЯ АНИМАЦИЯ (a1 - a5)
+              fps={8} — скорость (8 кадров/сек)
+             ==================================================== */}
+          <AnimatedWallDecal
+            urls={[
+              '/a1.png',
+              '/a2.png',
+              '/a3.png',
+              '/a4.png',
+              '/a5.png',
+            ]}
+            position={[-14.63, 5, 0]}
+            rotation={[0, 1.5708, 0]}
+            size={[18.0, 3.0]}
+            fps={4}
+          />
         </Suspense>
       </Canvas>
     </div>
