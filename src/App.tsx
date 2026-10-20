@@ -44,13 +44,11 @@ function Loader() {
 }
 
 // ----------------------------------------------------
-// 1. Интерфейс контроллера (Только горизонтальный полет)
+// 1. Состояние ввода (Аналоговые оси для джойстика и клавиатуры)
 // ----------------------------------------------------
-interface InputState {
-  forward: boolean;
-  backward: boolean;
-  left: boolean;
-  right: boolean;
+interface JoystickInput {
+  moveX: number; // от -1 (влево) до +1 (вправо)
+  moveY: number; // от -1 (назад) до +1 (вперед)
 }
 
 // ----------------------------------------------------
@@ -67,9 +65,9 @@ function ResponsiveCamera() {
 }
 
 // ----------------------------------------------------
-// 3. Персонаж-робот (Строгая фиксация высоты + защита от проемов и колец)
+// 3. Персонаж-робот (Плавный аналоговый отклик на палец)
 // ----------------------------------------------------
-function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
+function Drone({ input }: { input: React.MutableRefObject<JoystickInput> }) {
   const { scene: botScene } = useGLTF('/bot.glb');
   const { scene: roomScene } = useGLTF('/room.glb');
   const groupRef = useRef<THREE.Group>(null!);
@@ -97,7 +95,7 @@ function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
     angle: 0,
     tilt: 0,
     roll: 0,
-    speed: 3.5,
+    speed: 3.8,
   });
 
   useEffect(() => {
@@ -110,7 +108,6 @@ function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
     });
   }, [botScene]);
 
-  // Проверка движения по всей ширине корпуса (не дает протиснуться в узкие дыры)
   const canMoveForward = (fromPos: THREE.Vector3, moveDist: number, moveAngle: number): boolean => {
     const dirX = Math.sin(moveAngle);
     const dirZ = Math.cos(moveAngle);
@@ -144,28 +141,19 @@ function Drone({ input }: { input: React.MutableRefObject<InputState> }) {
     const s = state.current;
     const time = stateThree.clock.getElapsedTime();
 
-    // 1. Поворот влево-вправо
+    // 1. Плавный поворот от горизонтального движения пальца / кнопок
     const turnSpeed = 2.4;
-    let targetRoll = 0;
-    if (inp.left) {
-      s.angle += turnSpeed * delta;
-      targetRoll = 0.22;
+    if (Math.abs(inp.moveX) > 0.05) {
+      s.angle += -inp.moveX * turnSpeed * delta;
     }
-    if (inp.right) {
-      s.angle -= turnSpeed * delta;
-      targetRoll = -0.22;
-    }
+    const targetRoll = -inp.moveX * 0.22;
 
-    // 2. Движение вперед-назад
+    // 2. Движение вперед/назад от вертикального движения пальца / кнопок
     let forwardSpeed = 0;
     let targetTilt = 0;
-    if (inp.forward) {
-      forwardSpeed = s.speed;
-      targetTilt = 0.18;
-    }
-    if (inp.backward) {
-      forwardSpeed = -s.speed * 0.6;
-      targetTilt = -0.12;
+    if (Math.abs(inp.moveY) > 0.05) {
+      forwardSpeed = inp.moveY * s.speed;
+      targetTilt = (inp.moveY > 0 ? 0.18 : -0.12) * Math.abs(inp.moveY);
     }
 
     if (forwardSpeed !== 0) {
@@ -371,8 +359,13 @@ function WallDecal({ url, position, rotation, size = [2.6, 2.6], opacity = 1.0 }
   const [w, h] = size;
 
   return (
-    <mesh position={position} rotation={rotation} receiveShadow>
-      <planeGeometry args={[w, h]} />
+    <mesh
+      position={position}
+      rotation={rotation}
+      scale={[w, h, 1]}
+      receiveShadow
+    >
+      <planeGeometry args={[1, 1]} />
       <meshStandardMaterial
         map={texture}
         transparent={true}
@@ -380,7 +373,7 @@ function WallDecal({ url, position, rotation, size = [2.6, 2.6], opacity = 1.0 }
         opacity={opacity}
         roughness={0.8}
         metalness={0.05}
-        depthWrite={true}
+        depthWrite={false}
         polygonOffset={true}
         polygonOffsetFactor={-1}
         polygonOffsetUnits={-1}
@@ -406,14 +399,13 @@ function AnimatedWallDecal({
   urls,
   position,
   rotation,
-  size = [1, 1],
+  size = [2.6, 2.6],
   fps = 8,
   opacity = 1.0,
 }: AnimatedWallDecalProps) {
   const textures = useTexture(urls);
   const [frameIndex, setFrameIndex] = useState(0);
 
-  // Настраиваем свойства для каждой текстуры
   const texList = useMemo(() => {
     const list = (Array.isArray(textures) ? textures : [textures]) as THREE.Texture[];
     list.forEach((tex) => {
@@ -424,18 +416,17 @@ function AnimatedWallDecal({
     return list;
   }, [textures]);
 
-  // Создаем готовые материалы с идеальной прозрачностью для каждого кадра
   const materials = useMemo(() => {
     return texList.map(
       (tex) =>
         new THREE.MeshStandardMaterial({
           map: tex,
           transparent: true,
-          alphaTest: 0.05,       // Четко отсекает прозрачные пиксели
+          alphaTest: 0.05,
           opacity: opacity,
           roughness: 0.8,
           metalness: 0.05,
-          depthWrite: false,     // Отключаем depthWrite, чтобы прозрачный фон не превращался в серый щит!
+          depthWrite: false,
           polygonOffset: true,
           polygonOffsetFactor: -1,
           polygonOffsetUnits: -1,
@@ -444,7 +435,6 @@ function AnimatedWallDecal({
     );
   }, [texList, opacity]);
 
-  // Таймер переключения кадров
   useEffect(() => {
     if (!urls || urls.length <= 1) return;
     const interval = 1000 / fps;
@@ -461,16 +451,17 @@ function AnimatedWallDecal({
     <mesh
       position={position}
       rotation={rotation}
+      scale={[w, h, 1]}
       material={currentMaterial}
       receiveShadow
     >
-      <planeGeometry args={[w, h]} />
+      <planeGeometry args={[1, 1]} />
     </mesh>
   );
 }
 
 // ----------------------------------------------------
-// 8. Реалистичное галерейное освещение
+// 8. Освещение
 // ----------------------------------------------------
 function Lighting() {
   const lightRef = useRef<THREE.DirectionalLight>(null!);
@@ -522,17 +513,19 @@ function Lighting() {
 }
 
 // ----------------------------------------------------
-// 9. Главный компонент
+// 9. Главный компонент (с плавающим сенсорным джойстиком)
 // ----------------------------------------------------
 export default function App() {
   const [isMobile, setIsMobile] = useState(false);
 
-  const input = useRef<InputState>({
-    forward: false,
-    backward: false,
-    left: false,
-    right: false,
-  });
+  // Аналоговый ввод (работает одновременно от пальца и от клавиатуры)
+  const input = useRef<JoystickInput>({ moveX: 0, moveY: 0 });
+
+  // Визуальное состояние плавающего джойстика
+  const [touchActive, setTouchActive] = useState(false);
+  const [touchOrigin, setTouchOrigin] = useState<{ x: number; y: number } | null>(null);
+  const [touchPos, setTouchPos] = useState<{ x: number; y: number } | null>(null);
+  const activeTouchId = useRef<number | null>(null);
 
   useEffect(() => {
     const checkDevice = () => {
@@ -548,18 +541,33 @@ export default function App() {
 
   // Клавиатура (ПК)
   useEffect(() => {
+    const keys = { w: false, s: false, a: false, d: false };
+
+    const updateKeys = () => {
+      let x = 0;
+      let y = 0;
+      if (keys.a) x -= 1;
+      if (keys.d) x += 1;
+      if (keys.w) y += 1;
+      if (keys.s) y -= 1;
+      input.current.moveX = x;
+      input.current.moveY = y;
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'ArrowUp' || e.code === 'KeyW') input.current.forward = true;
-      if (e.code === 'ArrowDown' || e.code === 'KeyS') input.current.backward = true;
-      if (e.code === 'ArrowLeft' || e.code === 'KeyA') input.current.left = true;
-      if (e.code === 'ArrowRight' || e.code === 'KeyD') input.current.right = true;
+      if (e.code === 'ArrowUp' || e.code === 'KeyW') keys.w = true;
+      if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.s = true;
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.a = true;
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.d = true;
+      updateKeys();
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.code === 'ArrowUp' || e.code === 'KeyW') input.current.forward = false;
-      if (e.code === 'ArrowDown' || e.code === 'KeyS') input.current.backward = false;
-      if (e.code === 'ArrowLeft' || e.code === 'KeyA') input.current.left = false;
-      if (e.code === 'ArrowRight' || e.code === 'KeyD') input.current.right = false;
+      if (e.code === 'ArrowUp' || e.code === 'KeyW') keys.w = false;
+      if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.s = false;
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.a = false;
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.d = false;
+      updateKeys();
     };
 
     window.addEventListener('keydown', onKeyDown);
@@ -570,41 +578,78 @@ export default function App() {
     };
   }, []);
 
-  const handleTouch = (key: keyof InputState, active: boolean) => {
-    input.current[key] = active;
+  // ----------------------------------------------------
+  // Сенсорные события: палец касается В ЛЮБОМ МЕСТЕ ЭКРАНА
+  // ----------------------------------------------------
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (activeTouchId.current !== null) return;
+    const touch = e.changedTouches[0];
+    activeTouchId.current = touch.identifier;
+
+    setTouchOrigin({ x: touch.clientX, y: touch.clientY });
+    setTouchPos({ x: touch.clientX, y: touch.clientY });
+    setTouchActive(true);
   };
 
-  const btnStyle = {
-    width: 54,
-    height: 54,
-    borderRadius: '50%',
-    background: 'rgba(255, 255, 255, 0.14)',
-    backdropFilter: 'blur(10px)',
-    border: '1px solid rgba(255, 255, 255, 0.28)',
-    color: '#ffffff',
-    fontSize: 20,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    userSelect: 'none' as const,
-    WebkitUserSelect: 'none' as const,
-    touchAction: 'none' as const,
-    cursor: 'pointer',
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (activeTouchId.current === null || !touchOrigin) return;
+
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const touch = e.changedTouches[i];
+      if (touch.identifier === activeTouchId.current) {
+        const dx = touch.clientX - touchOrigin.x;
+        const dy = touch.clientY - touchOrigin.y;
+
+        const MAX_RADIUS = 55; // Максимальный ход джойстика в пикселях
+        const dist = Math.hypot(dx, dy);
+        const clampedDist = Math.min(dist, MAX_RADIUS);
+        const angle = Math.atan2(dy, dx);
+
+        const clampedX = touchOrigin.x + Math.cos(angle) * clampedDist;
+        const clampedY = touchOrigin.y + Math.sin(angle) * clampedDist;
+
+        setTouchPos({ x: clampedX, y: clampedY });
+
+        // Переводим в нормализованный вектор от -1 до +1
+        input.current.moveX = (clampedDist / MAX_RADIUS) * Math.cos(angle);
+        input.current.moveY = -(clampedDist / MAX_RADIUS) * Math.sin(angle); // Вверх по экрану = вперед
+        break;
+      }
+    }
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      if (e.changedTouches[i].identifier === activeTouchId.current) {
+        activeTouchId.current = null;
+        setTouchActive(false);
+        setTouchOrigin(null);
+        setTouchPos(null);
+        input.current.moveX = 0;
+        input.current.moveY = 0;
+        break;
+      }
+    }
   };
 
   return (
-    <div style={{
-      width: '100vw',
-      height: '100vh',
-      background: '#0e1013',
-      margin: 0,
-      overflow: 'hidden',
-      position: 'relative',
-      userSelect: 'none',
-      WebkitUserSelect: 'none',
-      touchAction: 'none'
-    }}>
-      {/* Скрываем плашку Netlify */}
+    <div
+      style={{
+        width: '100vw',
+        height: '100vh',
+        background: '#0e1013',
+        margin: 0,
+        overflow: 'hidden',
+        position: 'relative',
+        userSelect: 'none',
+        WebkitUserSelect: 'none',
+        touchAction: 'none'
+      }}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      onTouchCancel={handleTouchEnd}
+    >
       <style>{`
         [id*="netlify"], iframe[src*="netlify"], .netlify-badge {
           display: none !important;
@@ -633,55 +678,64 @@ export default function App() {
           pointerEvents: 'none',
           boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
         }}>
-          <div>🧭 <b>Стрелочки</b> (↑ ↓ ← →) — полет и поворот</div>
+          <div>🧭 <b>Стрелочки / WASD</b> — полет и поворот</div>
         </div>
       )}
 
-      {/* Сенсорный D-Pad для мобильных */}
-      {isMobile && (
+      {/* Плавающий сенсорный джойстик под пальцем (появляется только при касании) */}
+      {touchActive && touchOrigin && touchPos && (
+        <div style={{ pointerEvents: 'none' }}>
+          {/* Базовый внешний круг */}
+          <div style={{
+            position: 'absolute',
+            left: touchOrigin.x - 55,
+            top: touchOrigin.y - 55,
+            width: 110,
+            height: 110,
+            borderRadius: '50%',
+            background: 'rgba(0, 240, 255, 0.08)',
+            border: '2px solid rgba(0, 240, 255, 0.4)',
+            boxShadow: '0 0 20px rgba(0, 240, 255, 0.25)',
+            zIndex: 100,
+          }} />
+
+          {/* Центральный бегунок под пальцем */}
+          <div style={{
+            position: 'absolute',
+            left: touchPos.x - 22,
+            top: touchPos.y - 22,
+            width: 44,
+            height: 44,
+            borderRadius: '50%',
+            background: 'rgba(0, 240, 255, 0.75)',
+            border: '2px solid #ffffff',
+            boxShadow: '0 0 15px #00f0ff',
+            zIndex: 101,
+          }} />
+        </div>
+      )}
+
+      {/* Легкая аккуратная подсказка на мобилках */}
+      {isMobile && !touchActive && (
         <div style={{
           position: 'absolute',
-          bottom: 90,
+          bottom: 30,
           left: '50%',
           transform: 'translateX(-50%)',
-          zIndex: 60,
-          display: 'grid',
-          gridTemplateColumns: 'repeat(3, 56px)',
-          gridTemplateRows: 'repeat(3, 56px)',
-          gap: 8,
-          touchAction: 'none'
+          zIndex: 50,
+          background: 'rgba(15, 17, 22, 0.6)',
+          backdropFilter: 'blur(6px)',
+          border: '1px solid rgba(255,255,255,0.1)',
+          padding: '8px 16px',
+          borderRadius: 20,
+          color: '#a0a8b4',
+          fontFamily: 'sans-serif',
+          fontSize: 12,
+          letterSpacing: 1,
+          pointerEvents: 'none',
+          whiteSpace: 'nowrap'
         }}>
-          <div />
-          <button
-            style={btnStyle}
-            onTouchStart={(e) => { e.preventDefault(); handleTouch('forward', true); }}
-            onTouchEnd={(e) => { e.preventDefault(); handleTouch('forward', false); }}
-            onTouchCancel={() => handleTouch('forward', false)}
-          >▲</button>
-          <div />
-
-          <button
-            style={btnStyle}
-            onTouchStart={(e) => { e.preventDefault(); handleTouch('left', true); }}
-            onTouchEnd={(e) => { e.preventDefault(); handleTouch('left', false); }}
-            onTouchCancel={() => handleTouch('left', false)}
-          >◀</button>
-          <div />
-          <button
-            style={btnStyle}
-            onTouchStart={(e) => { e.preventDefault(); handleTouch('right', true); }}
-            onTouchEnd={(e) => { e.preventDefault(); handleTouch('right', false); }}
-            onTouchCancel={() => handleTouch('right', false)}
-          >▶</button>
-
-          <div />
-          <button
-            style={btnStyle}
-            onTouchStart={(e) => { e.preventDefault(); handleTouch('backward', true); }}
-            onTouchEnd={(e) => { e.preventDefault(); handleTouch('backward', false); }}
-            onTouchCancel={() => handleTouch('backward', false)}
-          >▼</button>
-          <div />
+          Коснитесь экрана в любом месте для управления
         </div>
       )}
 
@@ -702,15 +756,6 @@ export default function App() {
         <Suspense fallback={<Loader />}>
           <Room />
           <Drone input={input} />
-
-          {/* ====================================================
-              СТАТИЧНЫЕ ИЗОБРАЖЕНИЯ (p1 - p6)
-              Шпаргалка поворотов rotation: [X, Y, Z]:
-              - На дальнюю стену:  rotation={[0, 0, 0]}
-              - На ближнюю стену:  rotation={[0, Math.PI, 0]}
-              - На правую стену:   rotation={[0, -Math.PI / 2, 0]}
-              - На левую стену:    rotation={[0, Math.PI / 2, 0]}
-             ==================================================== */}
 
           {/* 1. Изображение p1.png */}
           <WallDecal
@@ -760,10 +805,7 @@ export default function App() {
             size={[2.5, 2.5]}
           />
 
-          {/* ====================================================
-              ПОКАДРОВАЯ АНИМАЦИЯ (a1 - a5)
-              fps={8} — скорость (8 кадров/сек)
-             ==================================================== */}
+          {/* 7. Покадровая анимация a1 - a5 */}
           <AnimatedWallDecal
             urls={[
               '/a1.png',
