@@ -833,7 +833,7 @@ export default function App() {
           <Room />
           <Drone input={input} />
 
-          {/* 1. Изображение p1.png */}
+          {/* 1. Изображение главная стена p1.png */}
           <WallDecal
             url="/p1.png"
             position={[6.5, 2.25, -13.39]}
@@ -841,42 +841,42 @@ export default function App() {
             size={[15, 5]}
           />
 
-          {/* 2. Изображение p2.png */}
+          {/* 2. Изображение задняя p2.png */}
           <WallDecal
             url="/p2.png"
-            position={[-3, 0, 6.5]}
-            rotation={[1.5708, 3.1415, 0]}
-            size={[15, 7.5]}
+            position={[14.5, 5, 0]}
+            rotation={[0, -1.5708, 0]}
+            size={[25, 15]}
           />
 
           {/* 3. Изображение p3.png */}
           <WallDecal
             url="/p3.png"
-            position={[0, 0, 0]}
-            rotation={[0, 0, 0]}
-            size={[2.5, 2.5]}
+            position={[-14.62, 2.2, -0.5]}
+            rotation={[0, 1.5708, 0]}
+            size={[22, 5]}
           />
 
           {/* 4. Изображение p4.png */}
           <WallDecal
             url="/p4.png"
-            position={[0, 0, 0]}
+            position={[-9.5, 2.2, -13.39]}
             rotation={[0, 0, 0]}
-            size={[2.5, 2.5]}
+            size={[10, 5]}
           />
 
           {/* 5. Изображение p5.png */}
           <WallDecal
             url="/p5.png"
-            position={[0, 0, 0]}
-            rotation={[0, 0, 0]}
-            size={[2.5, 2.5]}
+            position={[-3.95, 2.2, -10]}
+            rotation={[0, -1.5708, 0]}
+            size={[6, 5]}
           />
 
           {/* 6. Изображение p6.png */}
           <WallDecal
             url="/p6.png"
-            position={[0, 0, 0]}
+            position={[0, -2, 0]}
             rotation={[0, 0, 0]}
             size={[2.5, 2.5]}
           />
@@ -890,7 +890,7 @@ export default function App() {
               '/a4.png',
               '/a5.png',
             ]}
-            position={[-14.63, 5, 0]}
+            position={[-14.63, 6, 0]}
             rotation={[0, 1.5708, 0]}
             size={[18.0, 3.0]}
             fps={4}
