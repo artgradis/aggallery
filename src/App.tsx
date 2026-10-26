@@ -58,7 +58,8 @@ function ResponsiveCamera() {
   const { camera, size } = useThree();
   useEffect(() => {
     const isMobile = size.width < 768;
-    (camera as THREE.PerspectiveCamera).fov = isMobile ? 78 : 68;
+    // На мобильных снижаем FOV, чтобы постеры не казались далекими и мелкими, а выглядели крупно и четко
+    (camera as THREE.PerspectiveCamera).fov = isMobile ? 66 : 68;
     camera.updateProjectionMatrix();
   }, [camera, size]);
   return null;
@@ -74,9 +75,21 @@ function Drone({ input }: { input: React.MutableRefObject<JoystickInput> }) {
 
   const roomMeshes = useMemo(() => {
     const meshes: THREE.Mesh[] = [];
+    const ignoredNames = [
+      'pl1', 'pl2', 'pl3',
+      'q1',
+      '1w1', '1w2', '1w3', '1w4',
+      '2w1', '2w2', '2w3',
+      '3w1', '3w2', '3w3', '3w4',
+      '4w1', '4w2'
+    ];
     roomScene.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) {
-        meshes.push(child as THREE.Mesh);
+        const name = (child.name || '').toLowerCase().trim();
+        // Тонкие плоскости плакатов исключаем из коллизий, чтобы дрон об них не запинался
+        if (!ignoredNames.includes(name)) {
+          meshes.push(child as THREE.Mesh);
+        }
       }
     });
     return meshes;
@@ -306,38 +319,539 @@ function useConcreteTextures() {
 // ----------------------------------------------------
 // 5. Комната
 // ----------------------------------------------------
+// ----------------------------------------------------
+// ----------------------------------------------------
+// ----------------------------------------------------
+// 5. КВЕСТ 1: Стенд со слоями плаката и 3 кнопками
+// ----------------------------------------------------
+const QUEST1_LAYERS = {
+  layer1: ['/quest/m1.png', '/quest/m2.png', '/quest/m3.png', '/quest/m4.png'],
+  layer2: ['/quest/m5.png', '/quest/m6.png', '/quest/m7.png', '/quest/m8.png'],
+  layer3: ['/quest/m9.png', '/quest/m10.png', '/quest/m11.png', '/quest/m12.png'],
+};
+
+// Правильный ответ: m2 (индекс 1), m8 (индекс 3), m11 (индекс 2)
+const QUEST1_CORRECT = [1, 3, 2];
+
+interface QuestObjectsMap {
+  [key: string]: THREE.Mesh | null;
+}
+
+function QuestStand({
+  scene,
+  choices,
+  isSolved,
+}: {
+  scene: THREE.Group;
+  choices: [number, number, number];
+  isSolved: boolean;
+}) {
+  const textureLoader = useMemo(() => new THREE.TextureLoader(), []);
+
+  // Предзагрузка текстур с правильным разворотом
+  const loadedTextures = useMemo(() => {
+    const setupTex = (url: string) => {
+      const tex = textureLoader.load(url);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.center.set(0.5, 0.5);
+      tex.rotation = Math.PI / 2;
+      tex.repeat.set(-1, 1);
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.generateMipmaps = true;
+      tex.anisotropy = 16;
+      return tex;
+    };
+
+    return {
+      layer1: QUEST1_LAYERS.layer1.map(setupTex),
+      layer2: QUEST1_LAYERS.layer2.map(setupTex),
+      layer3: QUEST1_LAYERS.layer3.map(setupTex),
+    };
+  }, [textureLoader]);
+
+  // Находим объекты квеста
+  const questObjects = useMemo<QuestObjectsMap>(() => {
+    const map: QuestObjectsMap = {
+      p1: null,
+      pl1: null,
+      pl2: null,
+      pl3: null,
+      b1: null,
+      b2: null,
+      b3: null,
+    };
+
+    scene.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.isMesh) {
+        const name = (mesh.name || '').toLowerCase().trim();
+        if (name in map) {
+          map[name] = mesh;
+        }
+      }
+    });
+
+    return map;
+  }, [scene]);
+
+  // Настройка материалов и строгой очередности слоев (renderOrder)
+  useEffect(() => {
+    const pl1 = questObjects['pl1'];
+    const pl2 = questObjects['pl2'];
+    const pl3 = questObjects['pl3'];
+    const b1 = questObjects['b1'];
+    const b2 = questObjects['b2'];
+    const b3 = questObjects['b3'];
+
+    // Слой 1: Задний фон (рисуется первым в очереди: renderOrder = 10)
+    if (pl1) {
+      pl1.renderOrder = 10;
+      pl1.material = new THREE.MeshBasicMaterial({
+        map: loadedTextures.layer1[choices[0]],
+        transparent: false,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
+      });
+    }
+
+    // Слой 2: Средний прозрачный PNG
+    if (pl2) {
+      pl2.renderOrder = 20;
+      pl2.material = new THREE.MeshBasicMaterial({
+        map: loadedTextures.layer2[choices[1]],
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
+      });
+    }
+
+    // Слой 3: Передний прозрачный PNG
+    if (pl3) {
+      pl3.renderOrder = 3;
+      pl3.material = new THREE.MeshBasicMaterial({
+        map: loadedTextures.layer3[choices[2]],
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
+      });
+    }
+
+    // Кнопки b1, b2, b3 — монолитный матовый бетон
+    const btns = [b1, b2, b3];
+    btns.forEach((btn) => {
+      if (btn) {
+        btn.material = new THREE.MeshStandardMaterial({
+          color: new THREE.Color('#a8abb2'),
+          roughness: 0.86,
+          metalness: 0.03,
+        });
+      }
+    });
+  }, [questObjects, loadedTextures]);
+
+  // Обновление картинок при смене вариантов
+  useEffect(() => {
+    const pl1 = questObjects['pl1'];
+    const pl2 = questObjects['pl2'];
+    const pl3 = questObjects['pl3'];
+
+    if (pl1 && pl1.material instanceof THREE.MeshBasicMaterial) {
+      pl1.material.map = loadedTextures.layer1[choices[0]];
+      pl1.material.needsUpdate = true;
+    }
+    if (pl2 && pl2.material instanceof THREE.MeshBasicMaterial) {
+      pl2.material.map = loadedTextures.layer2[choices[1]];
+      pl2.material.needsUpdate = true;
+    }
+    if (pl3 && pl3.material instanceof THREE.MeshBasicMaterial) {
+      pl3.material.map = loadedTextures.layer3[choices[2]];
+      pl3.material.needsUpdate = true;
+    }
+  }, [choices, questObjects, loadedTextures]);
+
+  // Анимация плавного исчезновения стенда при победе
+  useFrame((_, delta) => {
+    if (isSolved) {
+      ['p1', 'pl1', 'pl2', 'pl3', 'b1', 'b2', 'b3'].forEach((name) => {
+        const obj = questObjects[name];
+        if (obj) {
+          obj.scale.lerp(new THREE.Vector3(0, 0, 0), delta * 2.5);
+          if (obj.scale.x < 0.02) {
+            obj.visible = false;
+          }
+        }
+      });
+    }
+  });
+
+  return null;
+}
+
+// ----------------------------------------------------
+// 5.1 КВЕСТ 2: Выбор постеров на 4 стенах и панель P2
+// ----------------------------------------------------
+// Стена 1 (4 постера): 1w1, 1w2, 1w3, 1w4
+// Стена 2 (3 постера): 2w1, 2w2, 2w3
+// Стена 3 (4 постера): 3w1, 3w2, 3w3, 3w4
+// Стена 4 (2 постера): 4w1, 4w2
+const QUEST2_ALL_POSTERS = [
+  '1w1', '1w2', '1w3', '1w4',
+  '2w1', '2w2', '2w3',
+  '3w1', '3w2', '3w3', '3w4',
+  '4w1', '4w2'
+];
+
+// Правильные ответы для каждой стены (1w2, 2w1, 3w3, 4w1)
+const QUEST2_CORRECT: { [wallId: string]: string } = {
+  '1': '1w2',
+  '2': '2w1',
+  '3': '3w3',
+  '4': '4w1',
+};
+
+// Праздничная неоновая палитра для салюта победы
+const CELEBRATION_COLORS = [
+  '#00f0ff', '#ff00aa', '#00ff88', '#ffea00',
+  '#aa00ff', '#ff3366', '#33ddff', '#ff9900'
+];
+
+function QuestWallPosters({
+  scene,
+  selectedPosters,
+  isQuest1Solved,
+  isQuest2Solved,
+}: {
+  scene: THREE.Group;
+  selectedPosters: { [wallId: string]: string };
+  isQuest1Solved: boolean;
+  isQuest2Solved: boolean;
+}) {
+  const posterMeshes = useRef<{ [name: string]: THREE.Mesh }>({});
+  const p2MeshRef = useRef<THREE.Mesh | null>(null);
+  const textureLoader = useMemo(() => new THREE.TextureLoader(), []);
+
+  // Предзагрузка текстур p2.png и p3.png (с поддержкой как папки /quest, так и корня /)
+  const victoryTextures = useMemo(() => {
+    const loadSafe = (path1: string, path2: string) => {
+      const tex = textureLoader.load(path1, undefined, undefined, () => {
+        textureLoader.load(path2, (fallbackTex) => {
+          fallbackTex.colorSpace = THREE.SRGBColorSpace;
+          fallbackTex.anisotropy = 16;
+          tex.image = fallbackTex.image;
+          tex.needsUpdate = true;
+        });
+      });
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = 16;
+      return tex;
+    };
+
+    return {
+      q1: loadSafe('/quest/q1.png', '/q1.png'),
+      q2: loadSafe('/quest/q2.png', '/q2.png'),
+    };
+  }, [textureLoader]);
+
+  // Загрузка текстур постеров 1w1...4w2 из папки /quest/
+  const posterTextures = useMemo(() => {
+    const texMap: { [name: string]: THREE.Texture } = {};
+    QUEST2_ALL_POSTERS.forEach((name) => {
+      const tex = textureLoader.load(`/quest/${name}.png`, undefined, undefined, () => {
+        textureLoader.load(`/${name}.png`, (fb) => {
+          fb.colorSpace = THREE.SRGBColorSpace;
+          fb.anisotropy = 16;
+          tex.image = fb.image;
+          tex.needsUpdate = true;
+        });
+      });
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = 16;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      texMap[name] = tex;
+    });
+    return texMap;
+  }, [textureLoader]);
+
+  // Инициализация мешей постеров и панели p2
+  useEffect(() => {
+    const meshes: { [name: string]: THREE.Mesh } = {};
+
+    scene.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.isMesh) {
+        const name = (mesh.name || '').toLowerCase().trim();
+
+        // Постеры квеста 2
+        if (QUEST2_ALL_POSTERS.includes(name)) {
+          meshes[name] = mesh;
+          mesh.material = new THREE.MeshStandardMaterial({
+            map: posterTextures[name],
+            roughness: 0.35,
+            metalness: 0.05,
+            color: new THREE.Color('#ffffff'),
+            emissive: new THREE.Color('#000000'),
+            emissiveIntensity: 0.0,
+            polygonOffset: true,
+            polygonOffsetFactor: -1.0,
+            polygonOffsetUnits: -1.0,
+            side: THREE.DoubleSide,
+          });
+          // По умолчанию скрыты до завершения 1 квеста
+          mesh.visible = isQuest1Solved;
+        }
+
+        // Панель q1
+        if (name === 'q1') {
+          p2MeshRef.current = mesh;
+          mesh.material = new THREE.MeshStandardMaterial({
+            map: victoryTextures.q1,
+            roughness: 0.4,
+            metalness: 0.05,
+            color: new THREE.Color('#ffffff'),
+            emissive: new THREE.Color('#000000'),
+            emissiveIntensity: 0.0,
+            polygonOffset: true,
+            polygonOffsetFactor: -1.0,
+            polygonOffsetUnits: -1.0,
+            side: THREE.DoubleSide,
+          });
+          // По умолчанию скрыта до завершения 1 квеста
+          mesh.visible = isQuest1Solved;
+        }
+      }
+    });
+
+    posterMeshes.current = meshes;
+  }, [scene, posterTextures, victoryTextures]);
+
+  // Появление постеров и p2 только после прохождения Квеста 1
+  useEffect(() => {
+    Object.values(posterMeshes.current).forEach((mesh) => {
+      mesh.visible = isQuest1Solved;
+    });
+    if (p2MeshRef.current) {
+      p2MeshRef.current.visible = isQuest1Solved;
+    }
+  }, [isQuest1Solved]);
+
+  // Смена изображения на q1: при победе Квеста 2 ставим q2.png ("Победа!")
+  useEffect(() => {
+    if (p2MeshRef.current && p2MeshRef.current.material) {
+      const mat = p2MeshRef.current.material as THREE.MeshStandardMaterial;
+      if (isQuest2Solved) {
+        mat.map = victoryTextures.q2;
+        mat.emissive.set('#00ff88');
+        mat.emissiveIntensity = 0.5;
+      } else {
+        mat.map = victoryTextures.q1;
+        mat.emissive.set('#000000');
+        mat.emissiveIntensity = 0.0;
+      }
+      mat.needsUpdate = true;
+    }
+  }, [isQuest2Solved, victoryTextures]);
+
+  // Подсветка выбора во время игры
+  useEffect(() => {
+    if (isQuest2Solved) return;
+
+    const selectedList = Object.values(selectedPosters);
+
+    Object.entries(posterMeshes.current).forEach(([name, mesh]) => {
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      if (!mat) return;
+
+      const isSelected = selectedList.includes(name);
+      if (isSelected) {
+        mat.emissive.set('#00f0ff');
+        mat.emissiveIntensity = 0.85;
+      } else {
+        mat.emissive.set('#000000');
+        mat.emissiveIntensity = 0.0;
+      }
+      mat.needsUpdate = true;
+    });
+  }, [selectedPosters, isQuest2Solved]);
+
+  // Анимация в кадре:
+  // 1) Пока игра идет — выбранные постеры мягко пульсируют
+  // 2) При ПОБЕДЕ — все постеры на стенах устраивают яркий праздничный фейерверк разными неоновыми цветами!
+  useFrame(({ clock }) => {
+    if (!isQuest1Solved) return;
+    const t = clock.getElapsedTime();
+
+    if (isQuest2Solved) {
+      // 🎉 ПРАЗДНИЧНЫЙ САЛЮТ: Все постеры мерцают разными яркими цветами
+      Object.entries(posterMeshes.current).forEach(([_, mesh], index) => {
+        if (!mesh || !mesh.material) return;
+        const mat = mesh.material as THREE.MeshStandardMaterial;
+
+        const colorIdx = Math.floor((t * 3.5 + index * 1.3) % CELEBRATION_COLORS.length);
+        const brightness = 0.55 + Math.sin(t * 7 + index * 1.7) * 0.45;
+
+        mat.emissive.set(CELEBRATION_COLORS[colorIdx]);
+        mat.emissiveIntensity = brightness;
+      });
+    } else {
+      const selectedList = Object.values(selectedPosters);
+      if (selectedList.length === 0) return;
+
+      const pulse = 0.75 + Math.sin(t * 4) * 0.2;
+      selectedList.forEach((name) => {
+        const mesh = posterMeshes.current[name];
+        if (mesh && mesh.material) {
+          (mesh.material as THREE.MeshStandardMaterial).emissiveIntensity = pulse;
+        }
+      });
+    }
+  });
+
+  return null;
+}
+
+// ----------------------------------------------------
+// 5.2 Комната со всеми объектами и логикой кликов
+// ----------------------------------------------------
 function Room() {
   const { scene } = useGLTF('/room.glb');
   const { map, bumpMap } = useConcreteTextures();
 
+  // Состояние Квеста 1 (Стенд)
+  const [choices, setChoices] = useState<[number, number, number]>([0, 0, 0]);
+  const [isSolvedQuest1, setIsSolvedQuest1] = useState(false);
+
+  // Состояние Квеста 2 (Постеры на 4 стенах)
+  const [selectedPosters, setSelectedPosters] = useState<{ [wallId: string]: string }>({});
+  const [isSolvedQuest2, setIsSolvedQuest2] = useState(false);
+
+  const lastClickTime = useRef(0);
+
   useEffect(() => {
+    const quest1Names = ['p1', 'pl1', 'pl2', 'pl3', 'b1', 'b2', 'b3'];
+    const excludedMeshes = [...quest1Names, 'q1', ...QUEST2_ALL_POSTERS];
+
     scene.traverse((child) => {
       const mesh = child as THREE.Mesh;
       if (mesh.isMesh) {
         mesh.castShadow = true;
         mesh.receiveShadow = true;
 
-        mesh.material = new THREE.MeshStandardMaterial({
-          map: map,
-          bumpMap: bumpMap,
-          bumpScale: 0.02,
-          roughness: 0.86,
-          metalness: 0.03,
-          color: new THREE.Color('#a8abb2'),
-          shadowSide: THREE.DoubleSide,
-        });
+        const name = (mesh.name || '').toLowerCase().trim();
+        // Красим бетоном стены и пол, но НЕ трогаем объекты обоих квестов и plane p2!
+        if (!excludedMeshes.includes(name)) {
+          mesh.material = new THREE.MeshStandardMaterial({
+            map: map,
+            bumpMap: bumpMap,
+            bumpScale: 0.02,
+            roughness: 0.86,
+            metalness: 0.03,
+            color: new THREE.Color('#a8abb2'),
+            shadowSide: THREE.DoubleSide,
+          });
+        }
       }
     });
   }, [scene, map, bumpMap]);
 
-  return <primitive object={scene} position={[0, 0, 0]} />;
+  // Единая надежная обработка кликов по интерактивным объектам в 3D
+  const handlePointerDown = (e: any) => {
+    const clickedMesh = e.object as THREE.Mesh;
+    const name = (clickedMesh?.name || '').toLowerCase().trim();
+
+    const now = Date.now();
+    if (now - lastClickTime.current < 220) return;
+
+    // --- Обработка клика по кнопкам КВЕСТА 1 ---
+    let btnIndex = -1;
+    if (name === 'b1') btnIndex = 0;
+    else if (name === 'b2') btnIndex = 1;
+    else if (name === 'b3') btnIndex = 2;
+
+    if (btnIndex !== -1 && !isSolvedQuest1) {
+      e.stopPropagation();
+      lastClickTime.current = now;
+
+      setChoices((prev) => {
+        const next: [number, number, number] = [...prev];
+        next[btnIndex] = (next[btnIndex] + 1) % 4;
+
+        if (
+          next[0] === QUEST1_CORRECT[0] &&
+          next[1] === QUEST1_CORRECT[1] &&
+          next[2] === QUEST1_CORRECT[2]
+        ) {
+          setIsSolvedQuest1(true);
+          console.log('🎉 КВЕСТ 1 УСПЕШНО ПРОЙДЕН! (m2, m8, m11) -> Постеры Квеста 2 активированы!');
+        }
+
+        return next;
+      });
+      return;
+    }
+
+    // --- Обработка клика по постерам КВЕСТА 2 (только если Квест 1 уже решен!) ---
+    if (QUEST2_ALL_POSTERS.includes(name) && isSolvedQuest1 && !isSolvedQuest2) {
+      e.stopPropagation();
+      lastClickTime.current = now;
+
+      const wallId = name.charAt(0);
+
+      setSelectedPosters((prev) => {
+        const next = { ...prev };
+
+        if (next[wallId] === name) {
+          delete next[wallId];
+        } else {
+          next[wallId] = name;
+        }
+
+        // Проверяем победную комбинацию (1w2, 2w1, 3w3, 4w1)
+        const isCorrect =
+          next['1'] === QUEST2_CORRECT['1'] &&
+          next['2'] === QUEST2_CORRECT['2'] &&
+          next['3'] === QUEST2_CORRECT['3'] &&
+          next['4'] === QUEST2_CORRECT['4'];
+
+        if (isCorrect) {
+          setIsSolvedQuest2(true);
+          console.log('🎉 КВЕСТ 2 УСПЕШНО ПРОЙДЕН! (1w2, 2w1, 3w3, 4w1) -> САЛЮТ И ПОБЕДА НА P2!');
+        }
+
+        return next;
+      });
+    }
+  };
+
+  return (
+    <>
+      <primitive
+        object={scene}
+        position={[0, 0, 0]}
+        onPointerDown={handlePointerDown}
+      />
+      <QuestStand
+        scene={scene}
+        choices={choices}
+        isSolved={isSolvedQuest1}
+      />
+      <QuestWallPosters
+        scene={scene}
+        selectedPosters={selectedPosters}
+        isQuest1Solved={isSolvedQuest1}
+        isQuest2Solved={isSolvedQuest2}
+      />
+    </>
+  );
 }
 
 useGLTF.preload('/room.glb');
 
-// ----------------------------------------------------
-// 6. Компонент статичного арта из прозрачного PNG
-// ----------------------------------------------------
+
 interface WallDecalProps {
   url: string;
   position: [number, number, number];
@@ -352,6 +866,10 @@ function WallDecal({ url, position, rotation, size = [2.6, 2.6], opacity = 1.0 }
   useMemo(() => {
     if (texture) {
       texture.colorSpace = THREE.SRGBColorSpace;
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.generateMipmaps = true;
+      texture.anisotropy = 16;
       texture.needsUpdate = true;
     }
   }, [texture]);
@@ -817,7 +1335,7 @@ export default function App() {
       
       <Canvas
         shadows={{ type: THREE.PCFSoftShadowMap }}
-        dpr={[1, 1.5]}
+        dpr={[1, 2.5]}
         camera={{ position: [0, 2.5, 6], fov: 68 }}
         gl={{
           antialias: true,
@@ -879,6 +1397,14 @@ export default function App() {
             position={[0, -2, 0]}
             rotation={[0, 0, 0]}
             size={[2.5, 2.5]}
+          />
+
+          {/* 7. Изображение p7.png */}
+          <WallDecal
+            url="/p7.png"
+            position={[-14.62, 4.2, 11]}
+            rotation={[0, 1.5708, 0]}
+            size={[12, 8]}
           />
 
           {/* 7. Покадровая анимация a1 - a5 */}
